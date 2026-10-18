@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { native } from "../lib/native";
-import type { AppSettings, RuntimeStatus, SettingsEnvelope, TelemetryFrame } from "../types";
+import type { ActionRecord, AppSettings, RuntimeStatus, SettingsEnvelope, TelemetryFrame } from "../types";
 
 const MAX_HISTORY = 90;
 
@@ -11,6 +11,15 @@ export function useMemFlux() {
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const [purging, setPurging] = useState(false);
+  const [actionHistory, setActionHistory] = useState<ActionRecord[]>([]);
+
+  const acceptAction = useCallback((record: ActionRecord) => {
+    setActionHistory((current) => {
+      const withoutDuplicate = current.filter((item) => item.id !== record.id);
+      return [...withoutDuplicate, record].slice(-100);
+    });
+  }, []);
 
   const acceptFrame = useCallback((next: TelemetryFrame) => {
     setFrame(next);
@@ -24,12 +33,13 @@ export function useMemFlux() {
     let active = true;
     const unlisteners: Array<() => void> = [];
 
-    Promise.all([native.latestFrame(), native.settings(), native.runtimeStatus()])
-      .then(([latest, envelope, status]) => {
+    Promise.all([native.latestFrame(), native.settings(), native.runtimeStatus(), native.actionHistory()])
+      .then(([latest, envelope, status, actions]) => {
         if (!active) return;
         if (latest) acceptFrame(latest);
         setSettingsEnvelope(envelope);
         setRuntime(status);
+        setActionHistory(actions);
       })
       .catch((reason: unknown) => {
         if (active) setError(reason instanceof Error ? reason.message : String(reason));
@@ -51,11 +61,18 @@ export function useMemFlux() {
       else unlisten();
     }).catch(() => undefined);
 
+    native.onAction((record) => {
+      if (active) acceptAction(record);
+    }).then((unlisten) => {
+      if (active) unlisteners.push(unlisten);
+      else unlisten();
+    }).catch(() => undefined);
+
     return () => {
       active = false;
       unlisteners.forEach((unlisten) => unlisten());
     };
-  }, [acceptFrame]);
+  }, [acceptAction, acceptFrame]);
 
   const setPaused = useCallback(async (paused: boolean) => {
     setError(null);
@@ -85,6 +102,21 @@ export function useMemFlux() {
     }
   }, []);
 
+  const purgeStandby = useCallback(async () => {
+    setPurging(true);
+    setError(null);
+    try {
+      const record = await native.purgeStandby();
+      acceptAction(record);
+      return record;
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+      throw reason;
+    } finally {
+      setPurging(false);
+    }
+  }, [acceptAction]);
+
   return useMemo(() => ({
     frame,
     history,
@@ -92,8 +124,11 @@ export function useMemFlux() {
     runtime,
     error,
     saving,
+    purging,
+    actionHistory,
     setPaused,
-    saveSettings
-  }), [frame, history, settingsEnvelope, runtime, error, saving, setPaused, saveSettings]);
+    saveSettings,
+    purgeStandby
+  }), [frame, history, settingsEnvelope, runtime, error, saving, purging, actionHistory, setPaused, saveSettings, purgeStandby]);
 }
 

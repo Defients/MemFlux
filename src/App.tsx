@@ -6,12 +6,13 @@ import {
   formatCount,
   formatMetric,
   formatPercent,
-  formatRate,
   formatTimestamp,
   pressureLabel,
   statusLabel
 } from "./lib/format";
 import type {
+  ActionCapability,
+  ActionRecord,
   AppSettings,
   GuardianDecision,
   MemorySnapshot,
@@ -121,7 +122,7 @@ function AppShell({
             <span className={`engine-orbit ${paused ? "is-paused" : ""}`}><Icon name="pulse" size={17} /></span>
             <span><strong>{paused ? "Monitoring paused" : "Engine online"}</strong><small>{frame ? `Sample #${frame.snapshot.sequence}` : "Initializing sensors"}</small></span>
           </div>
-          <div className="version-row"><span>Phase 1 alpha</span><span>v0.1.0</span></div>
+          <div className="version-row"><span>Cleaner milestone</span><span>v0.2.0</span></div>
         </div>
       </aside>
 
@@ -275,21 +276,68 @@ function TrendGraph({ history }: { history: TelemetryFrame[] }) {
   );
 }
 
-function OverviewPage({ frame, history }: { frame: TelemetryFrame; history: TelemetryFrame[] }) {
+function CleanerPanel({ capability, actions, purging, onPurge }: { capability: ActionCapability; actions: ActionRecord[]; purging: boolean; onPurge: () => void }) {
+  const lastAction = actions.at(-1) ?? null;
+  const resultClass = lastAction?.nativeRequestSucceeded ? "is-success" : lastAction ? "is-failure" : "";
+  const resultTitle = !lastAction
+    ? "No purge recorded this session"
+    : lastAction.nativeRequestSucceeded
+      ? lastAction.observedReductionBytes !== null && lastAction.observedReductionBytes >= 1024 * 1024
+        ? `${formatBytes(lastAction.observedReductionBytes)} standby reduction observed`
+        : "Windows accepted the request; no material reduction observed"
+      : lastAction.outcome === "elevation_cancelled"
+        ? "Administrator approval was cancelled"
+        : "Standby purge did not complete";
+  return (
+    <section className={`panel cleaner-panel ${purging ? "is-running" : ""}`} aria-live="polite">
+      <div className="cleaner-copy">
+        <span className="eyebrow">Standby Cleaner</span>
+        <h2>Release the Windows standby list on demand.</h2>
+        <p>MemFlux captures real counters before and after the native request. Clearing cached data can cause later disk reads and does not guarantee better performance.</p>
+        <div className={`cleaner-capability capability-${capability.status}`}>
+          <span className="status-dot" />
+          <span><strong>{capability.status === "ready" ? "Native action ready" : capability.status === "requires_elevation" ? "Administrator approval required" : "Unsupported on this build"}</strong><small>{capability.explanation}</small></span>
+        </div>
+        <button className="purge-button" disabled={!capability.supported || purging} onClick={onPurge}>
+          <Icon name="pulse" size={21} />
+          <span>{purging ? "PURGING STANDBY MEMORY…" : "PURGE STANDBY MEMORY"}<small>{capability.requiresElevation ? "Windows UAC will request approval" : "Uses the validated native memory-list operation"}</small></span>
+        </button>
+      </div>
+      <div className={`cleaner-result ${resultClass}`}>
+        <span className="eyebrow">Last action</span>
+        <h3>{resultTitle}</h3>
+        {lastAction ? <>
+          <div className="result-grid">
+            <span><small>Standby before</small><strong>{formatBytes(lastAction.before?.standbyBytes ?? null)}</strong></span>
+            <span><small>Standby after</small><strong>{formatBytes(lastAction.after?.standbyBytes ?? null)}</strong></span>
+            <span><small>Free + zero before</small><strong>{formatBytes(lastAction.before?.freeZeroBytes ?? null)}</strong></span>
+            <span><small>Free + zero after</small><strong>{formatBytes(lastAction.after?.freeZeroBytes ?? null)}</strong></span>
+          </div>
+          <p>{lastAction.reason}</p>
+          <div className="result-meta"><code>{lastAction.ntStatusHex ?? "no native status"}</code><span>{lastAction.durationMs} ms total</span><span>{formatTimestamp(lastAction.timestampMs)}</span></div>
+          {actions.length > 1 && <div className="action-history"><strong>Recent actions</strong>{actions.slice(-4).reverse().map((record) => <div key={record.id}><span>{formatTimestamp(record.timestampMs)}</span><code>{record.ntStatusHex ?? "—"}</code><span>{formatBytes(record.observedReductionBytes)}</span></div>)}</div>}
+        </> : <p>Manual actions are serialized and retained in a bounded in-memory history. Native acceptance and measured change are reported separately.</p>}
+      </div>
+    </section>
+  );
+}
+
+function OverviewPage({ frame, history, capability, actions, purging, onPurge }: { frame: TelemetryFrame; history: TelemetryFrame[]; capability: ActionCapability; actions: ActionRecord[]; purging: boolean; onPurge: () => void }) {
   const { snapshot } = frame;
   return (
     <div className="page-stack">
-      <PageTitle eyebrow="Command center" title="System memory, understood." description="Live Windows telemetry interpreted conservatively. MemFlux will tell you when doing nothing is the right choice." side={<div className="timestamp-card"><span>Last native sample</span><strong>{formatTimestamp(snapshot.timestampMs)}</strong><small>{snapshot.sampleIntervalMs / 1000}s cadence</small></div>} />
+      <PageTitle eyebrow="Command center" title="Standby memory, under your control." description="Real Windows memory telemetry around a genuine, measured standby-list purge." side={<div className="timestamp-card"><span>Last native sample</span><strong>{formatTimestamp(snapshot.timestampMs)}</strong><small>{snapshot.sampleIntervalMs / 1000}s cadence</small></div>} />
       {snapshot.collectionStatus !== "monitoring" && <div className="degraded-banner"><Icon name="info" /><span><strong>{snapshot.collectionStatus === "degraded" ? "Partial telemetry" : "Telemetry issue"}</strong>{snapshot.collectionDetail ?? "One or more sensors are unavailable."}</span></div>}
+      <section className="metric-grid">
+        <MetricCard label="Standby cache" metric={snapshot.standbyBytes} formatter={formatBytes} context="Reclaimable file and application cache" accent="#a978ff" />
+        <MetricCard label="Free + zero" metric={snapshot.freeZeroBytes} formatter={formatBytes} context="Unassigned physical pages" accent="#77d9b4" />
+        <MetricCard label="Available memory" metric={snapshot.availablePhysicalBytes} formatter={formatBytes} context="Includes reclaimable standby" accent="#78beff" />
+        <MetricCard label="Physical load" metric={snapshot.physicalLoadPercent} formatter={(value) => formatPercent(value, 1)} context={`${formatBytes(snapshot.totalPhysicalBytes.value)} total physical memory`} accent="#d58fff" />
+      </section>
+      <CleanerPanel capability={capability} actions={actions} purging={purging} onPurge={onPurge} />
       <section className="overview-hero">
         <MemoryDial snapshot={snapshot} />
         <GuardianPanel decision={frame.guardian} updated={snapshot.timestampMs} />
-      </section>
-      <section className="metric-grid">
-        <MetricCard label="Available memory" metric={snapshot.availablePhysicalBytes} formatter={formatBytes} context="Immediately usable, including reclaimable standby" accent="#78beff" />
-        <MetricCard label="Commit utilization" metric={snapshot.commitPercent} formatter={(value) => formatPercent(value, 1)} context={`${formatBytes(snapshot.commitUsedBytes.value)} of ${formatBytes(snapshot.commitLimitBytes.value)} committed`} accent="#d58fff" />
-        <MetricCard label="Standby cache" metric={snapshot.standbyBytes} formatter={formatBytes} context="Reclaimable cache; healthy by itself" accent="#a978ff" />
-        <MetricCard label="Hard page reads" metric={snapshot.pageReadsPerSecond} formatter={formatRate} context="Backing-store reads, not generic page faults" accent="#77d9b4" />
       </section>
       <div className="dashboard-grid"><MemoryComposition snapshot={snapshot} /><TrendGraph history={history} /></div>
     </div>
@@ -337,17 +385,17 @@ function ExplorerPage({ frame }: { frame: TelemetryFrame }) {
   );
 }
 
-function GuardianPage({ frame, paused, onPause, capability }: { frame: TelemetryFrame; paused: boolean; onPause: () => void; capability: string }) {
+function GuardianPage({ frame, paused, onPause, capability }: { frame: TelemetryFrame; paused: boolean; onPause: () => void; capability: ActionCapability }) {
   const decision = frame.guardian;
   return (
     <div className="page-stack">
-      <PageTitle eyebrow="Adaptive Guardian" title="An engine with the discipline to wait." description="Guardian combines headroom, commit pressure, paging evidence, OS signals, and sustained-condition safeguards. Phase 1 is strictly observation-only." side={<button className={`button ${paused ? "button-primary" : "button-quiet"}`} onClick={onPause}><Icon name={paused ? "play" : "pause"} />{paused ? "Resume Guardian" : "Pause Guardian"}</button>} />
+      <PageTitle eyebrow="Adaptive Guardian" title="Assessment and cleaning policy stay distinct." description="Guardian explains pressure and safeguards. Manual standby clearing remains under direct user control and reports its own native outcome." side={<button className={`button ${paused ? "button-primary" : "button-quiet"}`} onClick={onPause}><Icon name={paused ? "play" : "pause"} />{paused ? "Resume Guardian" : "Pause Guardian"}</button>} />
       <GuardianPanel decision={decision} updated={frame.snapshot.timestampMs} />
       <div className="guardian-grid">
         <section className="panel evidence-panel"><div className="panel-heading"><div><span className="eyebrow">Decision trace</span><h2>Why Guardian chose {decision.outcome}</h2></div><code>{decision.reasonCode}</code></div><div className="evidence-list">{decision.evidence.length ? decision.evidence.map((item, index) => <div key={item}><span>{String(index + 1).padStart(2, "0")}</span><p>{item}</p></div>) : <div><span>—</span><p>No sensor evidence evaluated while paused.</p></div>}</div></section>
-        <section className="panel safeguards-panel"><span className="eyebrow">Hard safeguards</span><h2>Intervention boundary</h2><div className="capability-warning"><Icon name="shield" /><div><strong>{capability === "unsupported" ? "Native actions unavailable" : capability}</strong><p>Standby clearing is not exposed. No elevation, working-set trim, or undocumented memory-list command is hidden behind this interface.</p></div></div><ul className="check-list"><li><span>✓</span> Observe-only by default</li><li><span>✓</span> Three-sample pressure hysteresis</li><li><span>✓</span> Invalid telemetry suspends policy</li><li><span>✓</span> No automatic memory clearing</li></ul></section>
+        <section className="panel safeguards-panel"><span className="eyebrow">Action boundary</span><h2>Native cleaner capability</h2><div className="capability-warning"><Icon name="shield" /><div><strong>{capability.status}</strong><p>{capability.explanation}</p></div></div><ul className="check-list"><li><span>✓</span> Unelevated monitoring process</li><li><span>✓</span> One fixed elevated operation</li><li><span>✓</span> Serialized purge requests</li><li><span>✓</span> Native status separated from measured change</li></ul></section>
       </div>
-      <section className="panel policy-strip"><div><span className="policy-index">01</span><span><strong>Collect</strong><small>Documented Windows sources</small></span></div><i /><div><span className="policy-index">02</span><span><strong>Validate</strong><small>Status and range checks</small></span></div><i /><div><span className="policy-index">03</span><span><strong>Interpret</strong><small>Multi-signal pressure model</small></span></div><i /><div><span className="policy-index">04</span><span><strong>Observe</strong><small>No Phase 1 action path</small></span></div></section>
+      <section className="panel policy-strip"><div><span className="policy-index">01</span><span><strong>Measure</strong><small>Pre-action counters</small></span></div><i /><div><span className="policy-index">02</span><span><strong>Authorize</strong><small>Narrow Windows UAC helper</small></span></div><i /><div><span className="policy-index">03</span><span><strong>Execute</strong><small>Native standby purge</small></span></div><i /><div><span className="policy-index">04</span><span><strong>Verify</strong><small>Post-action counters</small></span></div></section>
     </div>
   );
 }
@@ -370,7 +418,7 @@ function SettingsPage({ envelope, saving, onSave }: { envelope: SettingsEnvelope
       <PageTitle eyebrow="Settings" title="Quiet by default. Precise by choice." description="Tune monitoring behavior and presentation. Settings are validated by the native runtime and stored locally in a versioned file." side={<button className="button button-primary" disabled={!changed || saving} onClick={() => void submit()}>{saving ? "Saving…" : saved ? "Saved" : "Save changes"}</button>} />
       {envelope.warning && <div className="degraded-banner"><Icon name="info" /><span><strong>Safe defaults active</strong>{envelope.warning}</span></div>}
       <div className="settings-grid">
-        <section className="panel settings-section"><span className="eyebrow">Guardian & lifecycle</span><h2>Background behavior</h2><Toggle checked={draft.guardianEnabled} onChange={(value) => update("guardianEnabled", value)} label="Adaptive Guardian" description="Interpret memory conditions. Phase 1 remains monitoring-only." /><Toggle checked={draft.closeToTray} onChange={(value) => update("closeToTray", value)} label="Close to system tray" description="Keep the collector running when the dashboard closes." /></section>
+        <section className="panel settings-section"><span className="eyebrow">Guardian & lifecycle</span><h2>Background behavior</h2><Toggle checked={draft.guardianEnabled} onChange={(value) => update("guardianEnabled", value)} label="Adaptive Guardian" description="Interpret memory pressure separately from manual cleaning." /><Toggle checked={draft.closeToTray} onChange={(value) => update("closeToTray", value)} label="Close to system tray" description="Keep the collector running when the dashboard closes." /></section>
         <section className="panel settings-section"><span className="eyebrow">Sampling policy</span><h2>Monitoring cadence</h2><label className="select-row"><span><strong>Dashboard visible</strong><small>Faster feedback while you are looking</small></span><select value={draft.foregroundIntervalMs} onChange={(event) => update("foregroundIntervalMs", Number(event.target.value))}><option value={500}>0.5 seconds</option><option value={1000}>1 second</option><option value={2000}>2 seconds</option><option value={5000}>5 seconds</option></select></label><label className="select-row"><span><strong>Dashboard hidden</strong><small>Lower-overhead background cadence</small></span><select value={draft.backgroundIntervalMs} onChange={(event) => update("backgroundIntervalMs", Number(event.target.value))}><option value={2000}>2 seconds</option><option value={5000}>5 seconds</option><option value={10000}>10 seconds</option><option value={30000}>30 seconds</option></select></label></section>
         <section className="panel settings-section"><span className="eyebrow">Appearance</span><h2>Interface comfort</h2><Toggle checked={draft.reducedMotion} onChange={(value) => update("reducedMotion", value)} label="Reduced motion" description="Suppress non-essential transitions and ambient movement." /><Toggle checked={draft.compactDensity} onChange={(value) => update("compactDensity", value)} label="Compact density" description="Tighten cards and tables for information-dense windows." /></section>
         <section className="panel settings-section storage-section"><span className="eyebrow">Local-first privacy</span><h2>Settings storage</h2><div className="storage-path"><code>{envelope.path || "Resolving local application data path…"}</code></div><ul className="check-list"><li><span>✓</span> No account required</li><li><span>✓</span> No uploaded analytics</li><li><span>✓</span> Atomic local writes</li></ul></section>
@@ -385,7 +433,7 @@ function UnavailablePanel({ title, detail }: { title: string; detail: string }) 
 
 export default function App() {
   const [page, setPage] = useState<PageId>("overview");
-  const { frame, history, settingsEnvelope, runtime, error, saving, setPaused, saveSettings } = useMemFlux();
+  const { frame, history, settingsEnvelope, runtime, error, saving, purging, actionHistory, setPaused, saveSettings, purgeStandby } = useMemFlux();
   const paused = runtime?.paused ?? false;
   const reducedMotion = settingsEnvelope?.settings.reducedMotion ?? false;
   const compactDensity = settingsEnvelope?.settings.compactDensity ?? false;
@@ -400,9 +448,10 @@ export default function App() {
     if (page === "settings") return settingsEnvelope ? <SettingsPage envelope={settingsEnvelope} saving={saving} onSave={saveSettings} /> : <LoadingView />;
     if (!frame) return <LoadingView />;
     if (page === "explorer") return <ExplorerPage frame={frame} />;
-    if (page === "guardian") return <GuardianPage frame={frame} paused={paused} onPause={() => void setPaused(!paused)} capability={runtime?.actionCapability ?? "unsupported"} />;
-    return <OverviewPage frame={frame} history={history} />;
-  }, [frame, page, history, settingsEnvelope, saving, saveSettings, paused, setPaused, runtime?.actionCapability]);
+    const capability = runtime?.actionCapability ?? { status: "unsupported", supported: false, requiresElevation: false, osBuild: null, mechanism: "Unavailable", explanation: "Capability detection has not completed." } satisfies ActionCapability;
+    if (page === "guardian") return <GuardianPage frame={frame} paused={paused} onPause={() => void setPaused(!paused)} capability={capability} />;
+    return <OverviewPage frame={frame} history={history} capability={capability} actions={actionHistory} purging={purging} onPurge={() => void purgeStandby()} />;
+  }, [frame, page, history, settingsEnvelope, saving, saveSettings, paused, setPaused, runtime?.actionCapability, actionHistory, purging, purgeStandby]);
 
   return (
     <AppShell page={page} onPage={setPage} frame={frame} paused={paused} onPause={() => void setPaused(!paused)}>

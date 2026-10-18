@@ -1,7 +1,30 @@
 # MemFlux Implementation Plan
 
 **Status date:** 2026-10-18  
-**Product identity:** Midnight CosmoTech™ Windows memory intelligence. Measure first, understand second, intervene only when justified, verify afterward.
+**Product identity:** Midnight CosmoTech™ Windows standby-memory cleaner with measured intelligence. Manual cleaning is core capability; monitoring and Guardian explain and verify it.
+
+## Core functionality recovery — V2.0
+
+The earlier monitoring-first phase interpretation is superseded. MemFlux is not complete without a real standby-list purge.
+
+### Milestone 1 — Working Cleaner
+
+**Status: implemented and native-engine verified on the single audited host; UI interaction validation partial**
+
+- [x] Isolated `NtSetSystemInformation(SystemMemoryListInformation=80, MemoryPurgeStandbyList=4)` in `action.rs`.
+- [x] Added exact `SeProfileSingleProcessPrivilege` enablement with `ERROR_NOT_ALL_ASSIGNED` handling.
+- [x] Kept the main monitor unelevated; added a fixed-argument, one-shot UAC helper in the same executable.
+- [x] Added an exact build allowlist. Build 26340 is enabled; other builds return Unsupported while monitoring continues.
+- [x] Added serialized manual action execution, pre/post snapshots, 750 ms settling time, raw `NTSTATUS`, measured reduction, and bounded 100-event session history.
+- [x] Added a prominent Overview cleaner control with distinct running, unsupported, failure, native-success/no-change, and measured-reduction results.
+- [x] Runtime-tested the helper on Windows 11 Home Insider Preview build 26340. Unelevated direct execution returned `0xC0000061`; elevated execution returned `0x00000000`. A retained controlled sample measured standby 233,820,160 → 25,538,560 bytes and Free & Zero 10,254,319,616 → 10,510,528,512 bytes after 750 ms.
+- [ ] Direct UI-driven UAC acceptance/rejection, simultaneous UI requests, and native visual interaction remain unverified because this session cannot attach to native app windows.
+
+### Milestone 2 — ISLC Functional Parity
+
+**Status: not implemented**
+
+Opt-in automatic cleaning, explicit standby/free-zero thresholds, polling, cooldown/minimum interval, maximum frequency, exclusions, cleaner-only pause, tray execution, and persistent action history remain the next milestone. Available physical memory must not substitute for Free & Zero Page List bytes.
 
 ## 1. Repository findings
 
@@ -47,7 +70,7 @@ Documented Windows APIs / PDH
 
 - Sampling belongs to the Rust runtime and continues when the dashboard is hidden.
 - The UI receives validated snapshots and can request settings changes, pause/resume, or a fresh snapshot through explicit commands.
-- Guardian is monitoring-only in Phase 1. It can Observe or Recommend, but it cannot Act.
+- Guardian pressure assessment remains diagnostic and separate from direct cleaner control.
 - Settings are owned and validated by Rust. The frontend does not write arbitrary files.
 - Closing the main window hides it to the tray; selecting Exit performs a real process exit. The tray exposes Open, Pause/Resume, and Exit.
 
@@ -59,7 +82,7 @@ Documented Windows APIs / PDH
 | Commit used/limit, physical totals, page size, process/thread counts | `GetPerformanceInfo` | Documented desktop API, Windows XP+ | Standard user | Implement and cross-check core totals |
 | OS low/high-memory condition | `CreateMemoryResourceNotification`, `QueryMemoryResourceNotification` | Documented desktop API, Windows XP+; includes a neutral band | Standard user | Implement; close handles deterministically |
 | Standby classes, modified list, free/zero list, page reads | PDH English counter paths | Documented performance-counter interface; individual counters can be absent | Standard user normally | Implement with per-counter unavailable state; never invent fallback values |
-| Standby-list purge | Common implementations rely on native system-information mechanisms not documented as a stable public Win32 action contract | Unsupported/unstable for product use until isolated and verified | Commonly requires elevated system-profile privilege | Do not implement or expose in Phase 1 |
+| Standby-list purge | `NtSetSystemInformation`, class 80, command 4; exported by `ntdll` but class/command are private and compatibility-sensitive | Runtime-verified only on build 26340 | `SeProfileSingleProcessPrivilege`, obtained through one-shot UAC helper | Implemented behind exact build allowlist |
 | Process working-set trim | `EmptyWorkingSet` | Documented, but affects a process working set rather than the system standby list | Target-process rights | Do not substitute for standby clearing |
 | Timer-period request | `timeBeginPeriod` / `timeEndPeriod` | Documented; process-scoped behavior on modern Windows and occlusion caveats on Windows 11 | Standard user | Research Lab only, disabled and not implemented in Phase 1 |
 
@@ -83,7 +106,7 @@ Authoritative references:
 
 - [x] Read the master directive in full.
 - [x] Audit files, toolchain, Git state, OS, SDK, WebView2, and local memory counters.
-- [x] Verify documented monitoring interfaces and unsupported intervention boundary.
+- [x] Verify documented monitoring interfaces and identify the compatibility-sensitive intervention boundary.
 - [x] Record architecture, risks, verification plan, and measurable gates.
 - [x] Add persistent project engineering rules without removing mirror rules.
 - [x] Scaffold and build Tauri/React/Rust application.
@@ -98,7 +121,7 @@ Authoritative references:
 - Real documented Windows collection with source, timestamp, interval, status, and error metadata.
 - Adaptive Rust sampling (dashboard cadence versus background cadence) independent of rendering.
 - Overview with memory condition, physical availability, active-use estimate, commit pressure, standby/free/modified composition, page-read activity, and sensor availability.
-- Explainable monitoring-only Guardian with sustained-condition history, confidence gating, Observe/Recommend outcomes, and reason codes.
+- Explainable diagnostic Guardian with sustained-condition history, confidence gating, Observe/Recommend outcomes, and reason codes.
 - Versioned settings persistence for Guardian enabled state, close-to-tray, sampling intervals, reduced motion, and compact visual density.
 - Native system tray with open, pause/resume, and explicit exit.
 - Diagnostic logging without user secrets or uploaded telemetry.
@@ -106,14 +129,13 @@ Authoritative references:
 
 **Gate result:** the standard-user native process launches, creates the tray before logging readiness, emits real host metrics for 60+ consecutive samples, reports counter warm-up honestly, persists settings in automated native tests, and enforces one instance. Direct visual inspection, tray menu clicks, close-to-tray/resume interaction, hidden-cadence timing, DPI/accessibility matrix, and explicit tray Exit remain unverified in this environment.
 
-### Phase 2 — Guardian and constrained actions
+### Phase 2 — Automatic cleaner policy
 
-**Status: planned; no action implementation authorized by current evidence**
+**Status: planned**
 
-- Expand deterministic hysteresis, cooldown, rate limits, exclusions, and decision history.
-- Add an isolated capability probe and explicit Unsupported result for standby actions.
-- Only consider an elevated, narrowly scoped helper after a supported or explicitly compatibility-gated mechanism is independently validated on representative Windows builds.
-- Never expose generic working-set trimming as standby clearing.
+- Implement opt-in ISLC-style standby/free-zero threshold evaluation.
+- Add cooldown, minimum interval, maximum frequency, exclusions, action serialization, cleaner pause, and persistent bounded history.
+- Retain the narrow helper and exact native operation; never expose generic working-set trimming as standby clearing.
 
 ### Phase 3 — Advanced intelligence
 
@@ -134,7 +156,7 @@ Authoritative references:
 | Insider-only local host is not representative | Runtime success may not generalize to stable Windows 10/11 | Mark local results precisely; require stable-build matrix before beta |
 | PDH counter absence or localization | Partial telemetry | Use English counter registration and per-metric availability; core APIs remain functional |
 | Counter semantics and double counting | Misleading dashboard | Treat available as inclusive; chart mutually exclusive estimates only; document formulas |
-| Undocumented standby action | Breakage, elevation, user disruption | Disabled/unsupported; narrow future adapter and build allowlist only after verification |
+| Compatibility-sensitive standby action | Breakage, elevation, user disruption | Isolated adapter, exact build allowlist, one-shot helper, raw status, serialization, and measured verification |
 | Tauri/WebView idle overhead | Missed lightweight budget | Release visible measurement met the CPU target at 0.131% normalized combined CPU over 20.4 seconds, but exceeded the exploratory memory budget at 249.95 MiB combined private bytes / 426.37 MiB combined working set. Treat memory budget as failed and investigate WebView2 process options or shell alternatives before beta. |
 | Close-to-tray ambiguity | User trust problem | Explain behavior in settings; tray Exit always exits; window close is configurable |
 | Settings corruption/interrupted write | Lost preferences or startup failure | Versioning, validation, defaults, atomic replacement, diagnostic warning |
@@ -179,11 +201,11 @@ Authoritative references:
 2. A standard-user native launch produces at least 60 consecutive real snapshots without fabricated values or an unhandled collection error.
 3. Physical total, available, commit used, and commit limit match OS tools within the expected one-sample timing variance.
 4. Every displayed metric includes a backend source/status; unavailable PDH metrics render as unavailable rather than zero.
-5. Guardian defaults to monitoring-only and emits stable reason codes. It cannot execute a memory action.
+5. Guardian emits stable pressure reason codes and stays separate from explicit cleaner control.
 6. A single transient low sample cannot produce a recommendation; a recommendation requires the configured sustained window and valid core telemetry.
 7. Settings survive a clean restart; malformed settings fall back safely with a logged diagnostic.
 8. Closing to tray leaves one sampler running, Open restores the window, Pause stops new sampling work, Resume restarts it, and Exit terminates the process.
-9. No Phase 1 workflow requests elevation, opens a shell, uses network access, or modifies unrelated system state.
+9. Monitoring never requests elevation; the cleaner requests UAC only for its fixed one-shot native operation and opens no shell or network path.
 10. The dashboard remains usable at a 900×620 logical window and supports keyboard navigation, visible focus, and reduced motion.
 
 ### Phase 1 verification snapshot — 2026-10-18

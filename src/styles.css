@@ -251,6 +251,40 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
 .text-panel h2 { margin-bottom: 10px; }
 .text-panel p { margin: 0; color: var(--text-secondary); font-size: 10.5px; line-height: 1.65; }
 
+.cleaner-panel { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(300px, .95fr); gap: 16px; margin-top: 14px; padding: 22px; overflow: hidden; border-color: rgba(169, 120, 255, .28); background: radial-gradient(circle at 12% 10%, rgba(169, 120, 255, .11), transparent 44%), var(--surface-panel); }
+.cleaner-panel.is-running { box-shadow: 0 0 34px rgba(169, 120, 255, .12), inset 0 0 0 1px rgba(213, 143, 255, .09); }
+.cleaner-copy h2 { margin: 6px 0 8px; font-size: 19px; }
+.cleaner-copy > p, .cleaner-result > p { margin: 0; color: var(--text-secondary); font-size: 9.5px; line-height: 1.55; }
+.cleaner-capability { display: flex; gap: 9px; align-items: flex-start; margin: 15px 0; padding: 10px 11px; border: 1px solid var(--border-subtle); border-radius: 10px; background: rgba(8, 7, 18, .35); }
+.cleaner-capability .status-dot { margin-top: 4px; }
+.cleaner-capability strong, .cleaner-capability small { display: block; }
+.cleaner-capability strong { font-size: 9.5px; }
+.cleaner-capability small { margin-top: 3px; color: var(--text-muted); font-size: 8px; line-height: 1.45; }
+.capability-ready .status-dot { background: var(--status-success); }
+.capability-requires_elevation .status-dot { background: var(--status-warning); }
+.capability-unsupported .status-dot { background: var(--status-danger); }
+.purge-button { display: flex; width: 100%; min-height: 54px; align-items: center; justify-content: center; gap: 11px; padding: 10px 18px; border: 1px solid rgba(213, 143, 255, .52); border-radius: 12px; background: linear-gradient(135deg, rgba(169, 120, 255, .88), rgba(99, 119, 255, .82)); color: white; box-shadow: 0 12px 30px rgba(86, 54, 177, .25); cursor: pointer; font: inherit; font-size: 10px; font-weight: 750; letter-spacing: .07em; }
+.purge-button span, .purge-button small { display: block; }
+.purge-button small { margin-top: 3px; color: rgba(255,255,255,.75); font-size: 7.5px; font-weight: 500; letter-spacing: 0; }
+.purge-button:disabled { cursor: not-allowed; filter: saturate(.35); opacity: .52; }
+.cleaner-panel.is-running .purge-button svg { animation: cleaner-pulse 900ms ease-in-out infinite alternate; }
+@keyframes cleaner-pulse { to { transform: scale(1.16); filter: drop-shadow(0 0 7px #fff); } }
+.cleaner-result { padding: 16px; border: 1px solid var(--border-subtle); border-radius: 12px; background: rgba(8, 7, 18, .42); }
+.cleaner-result.is-success { border-color: rgba(119, 217, 180, .24); }
+.cleaner-result.is-failure { border-color: rgba(241, 120, 148, .24); }
+.cleaner-result h3 { margin: 7px 0 14px; font-size: 13px; line-height: 1.35; }
+.result-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+.result-grid > span { padding: 9px; border: 1px solid rgba(52,45,78,.55); border-radius: 8px; background: rgba(24,21,45,.48); }
+.result-grid small, .result-grid strong { display: block; }
+.result-grid small { color: var(--text-muted); font-size: 7.5px; }
+.result-grid strong { margin-top: 3px; font-size: 11px; font-variant-numeric: tabular-nums; }
+.result-meta { display: flex; flex-wrap: wrap; gap: 7px 12px; margin-top: 12px; color: var(--text-muted); font-size: 7.5px; }
+.result-meta code { color: var(--accent-secondary); }
+.action-history { margin-top: 13px; padding-top: 10px; border-top: 1px solid rgba(52,45,78,.55); }
+.action-history > strong { display: block; margin-bottom: 6px; font-size: 8px; text-transform: uppercase; color: var(--text-muted); }
+.action-history > div { display: grid; grid-template-columns: 1fr auto auto; gap: 9px; padding: 4px 0; color: var(--text-muted); font-size: 7.5px; }
+.action-history code { color: var(--accent-secondary); }
+
 .guardian-grid { display: grid; grid-template-columns: 1.1fr .9fr; gap: 14px; margin-top: 14px; }
 .evidence-panel, .safeguards-panel { padding: 20px; }
 .evidence-panel .panel-heading code { color: var(--accent-tertiary); font-size: 8.5px; }
@@ -311,6 +345,7 @@ html[data-motion="reduced"] *::after { scroll-behavior: auto !important; animati
   .page-stack { padding-left: 22px; padding-right: 22px; }
   .metric-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .dashboard-grid { grid-template-columns: 1fr; }
+  .cleaner-panel { grid-template-columns: 1fr; }
   .composition-panel, .trend-panel { min-height: 255px; }
 }
 

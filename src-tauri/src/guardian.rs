@@ -56,7 +56,7 @@ impl GuardianEvaluator {
                 GuardianOutcome::Observe,
                 PressureLevel::Paused,
                 "guardian_paused",
-                "Guardian monitoring is paused. No intervention can occur.",
+                "Guardian pressure assessment is paused. Manual cleaner control remains independent.",
                 vec![],
                 "not_evaluated",
                 0,
@@ -119,7 +119,7 @@ impl GuardianEvaluator {
                     GuardianOutcome::Recommend,
                     PressureLevel::Critical,
                     "sustained_critical_pressure",
-                    "Sustained memory pressure is present. Review memory-heavy workloads; Phase 1 will not perform a memory action.",
+                    "Sustained memory pressure is present. Review memory-heavy workloads and the configured cleaner policy separately.",
                     evidence,
                     if page_reads.is_some() {
                         "high"
@@ -152,7 +152,7 @@ impl GuardianEvaluator {
                 GuardianOutcome::Observe,
                 PressureLevel::Elevated,
                 "elevated_pressure_observe",
-                "Memory pressure is elevated, but the evidence does not justify an intervention. Monitoring continues.",
+                "Memory pressure is elevated. Guardian continues assessing it without silently overriding cleaner controls.",
                 vec![
                     format!("Available physical memory: {available_percent:.1}%"),
                     format!("Commit utilization: {commit_percent:.1}%"),
@@ -229,7 +229,7 @@ fn decision(
         evidence,
         confidence: confidence.into(),
         sustained_samples,
-        action_capability: "unsupported_monitoring_only".into(),
+        action_capability: "manual_standby_purge_separate".into(),
     }
 }
 

@@ -1,9 +1,11 @@
+use crate::action::{self, ActionCapability, OPERATION_PURGE_STANDBY};
 use crate::guardian::{GuardianDecision, GuardianEvaluator};
 use crate::settings::{AppSettings, SettingsEnvelope, SettingsStore};
 use crate::telemetry::{Collector, MemorySnapshot, PlatformCollector};
 use serde::Serialize;
+use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager, State, WindowEvent};
@@ -11,6 +13,8 @@ use tauri::{Emitter, Manager, State, WindowEvent};
 const TRAY_ID: &str = "memflux-tray";
 const EVENT_FRAME: &str = "telemetry://frame";
 const EVENT_MONITORING: &str = "monitoring://state";
+const EVENT_ACTION: &str = "action://result";
+const ACTION_HISTORY_LIMIT: usize = 100;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -23,8 +27,35 @@ pub struct TelemetryFrame {
 #[serde(rename_all = "camelCase")]
 struct RuntimeStatus {
     paused: bool,
-    action_capability: String,
-    action_explanation: String,
+    cleaner_paused: bool,
+    action_capability: ActionCapability,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionMeasurement {
+    standby_bytes: Option<f64>,
+    free_zero_bytes: Option<f64>,
+    available_bytes: Option<f64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActionRecord {
+    id: String,
+    timestamp_ms: u64,
+    origin: String,
+    operation: String,
+    outcome: String,
+    native_request_succeeded: bool,
+    elevation_used: bool,
+    nt_status_hex: Option<String>,
+    before: Option<ActionMeasurement>,
+    after: Option<ActionMeasurement>,
+    observed_reduction_bytes: Option<f64>,
+    duration_ms: u64,
+    native_duration_ms: u64,
+    reason: String,
 }
 
 struct ControlState {
@@ -39,6 +70,8 @@ pub struct AppState {
     latest: RwLock<Option<TelemetryFrame>>,
     settings_store: SettingsStore,
     settings_warning: Mutex<Option<String>>,
+    action_lock: Mutex<()>,
+    action_history: Mutex<VecDeque<ActionRecord>>,
 }
 
 impl AppState {
@@ -53,6 +86,8 @@ impl AppState {
             latest: RwLock::new(None),
             settings_store: store,
             settings_warning: Mutex::new(envelope.warning),
+            action_lock: Mutex::new(()),
+            action_history: Mutex::new(VecDeque::with_capacity(ACTION_HISTORY_LIMIT)),
         }
     }
 
@@ -158,9 +193,193 @@ fn get_runtime_status(state: State<'_, Arc<AppState>>) -> RuntimeStatus {
         .paused;
     RuntimeStatus {
         paused,
-        action_capability: "unsupported".into(),
-        action_explanation: "Phase 1 is monitoring-only. MemFlux does not expose standby-list clearing on this unverified configuration.".into(),
+        cleaner_paused: false,
+        action_capability: action::capability(),
     }
+}
+
+#[tauri::command]
+fn get_action_history(state: State<'_, Arc<AppState>>) -> Vec<ActionRecord> {
+    state
+        .action_history
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .iter()
+        .cloned()
+        .collect()
+}
+
+#[tauri::command]
+async fn purge_standby_memory(
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<ActionRecord, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || run_manual_purge(&app, &state))
+        .await
+        .map_err(|error| format!("Standby purge worker failed: {error}"))
+}
+
+fn run_manual_purge(app: &tauri::AppHandle, state: &Arc<AppState>) -> ActionRecord {
+    let timestamp = crate::telemetry::timestamp_ms();
+    let started = Instant::now();
+    let Ok(_guard) = state.action_lock.try_lock() else {
+        return record_action(
+            app,
+            state,
+            ActionRecord {
+                id: format!("manual-{timestamp}"),
+                timestamp_ms: timestamp,
+                origin: "manual".into(),
+                operation: OPERATION_PURGE_STANDBY.into(),
+                outcome: "skipped_busy".into(),
+                native_request_succeeded: false,
+                elevation_used: false,
+                nt_status_hex: None,
+                before: None,
+                after: None,
+                observed_reduction_bytes: None,
+                duration_ms: 0,
+                native_duration_ms: 0,
+                reason: "Another memory action is already running.".into(),
+            },
+        );
+    };
+
+    let capability = action::capability();
+    if !capability.supported {
+        return record_action(
+            app,
+            state,
+            ActionRecord {
+                id: format!("manual-{timestamp}"),
+                timestamp_ms: timestamp,
+                origin: "manual".into(),
+                operation: OPERATION_PURGE_STANDBY.into(),
+                outcome: "unsupported".into(),
+                native_request_succeeded: false,
+                elevation_used: false,
+                nt_status_hex: None,
+                before: None,
+                after: None,
+                observed_reduction_bytes: None,
+                duration_ms: started.elapsed().as_millis() as u64,
+                native_duration_ms: 0,
+                reason: capability.explanation,
+            },
+        );
+    }
+
+    let mut collector = PlatformCollector::new();
+    let before_snapshot = collector.collect(0, 0);
+    let before = measurement(&before_snapshot);
+    if before.standby_bytes.is_none() || before.free_zero_bytes.is_none() {
+        return record_action(
+            app,
+            state,
+            ActionRecord {
+                id: format!("manual-{timestamp}"),
+                timestamp_ms: timestamp,
+                origin: "manual".into(),
+                operation: OPERATION_PURGE_STANDBY.into(),
+                outcome: "telemetry_unavailable".into(),
+                native_request_succeeded: false,
+                elevation_used: false,
+                nt_status_hex: None,
+                before: Some(before),
+                after: None,
+                observed_reduction_bytes: None,
+                duration_ms: started.elapsed().as_millis() as u64,
+                native_duration_ms: 0,
+                reason: "Standby and free/zero counters must both be valid before a purge.".into(),
+            },
+        );
+    }
+
+    log::info!("Manual standby purge requested; awaiting the narrow elevated helper if required.");
+    let native = action::execute_standby_purge();
+    let after = if native.request_succeeded {
+        std::thread::sleep(Duration::from_millis(750));
+        Some(measurement(&collector.collect(0, 750)))
+    } else {
+        None
+    };
+    let reduction = after.as_ref().and_then(|after| {
+        before
+            .standby_bytes
+            .zip(after.standby_bytes)
+            .map(|(before, after)| (before - after).max(0.0))
+    });
+    let outcome = action::classify_outcome(native.request_succeeded, native.nt_status, reduction);
+    let reason = match (native.request_succeeded, reduction) {
+        (true, Some(bytes)) if bytes >= 1024.0 * 1024.0 => format!(
+            "{} Measured standby reduction after settling: {:.2} MiB.",
+            native.detail,
+            bytes / 1024.0 / 1024.0
+        ),
+        (true, _) => format!(
+            "{} No material standby reduction was observed after the settling interval.",
+            native.detail
+        ),
+        (false, _) => native.detail,
+    };
+
+    record_action(
+        app,
+        state,
+        ActionRecord {
+            id: format!("manual-{timestamp}"),
+            timestamp_ms: timestamp,
+            origin: "manual".into(),
+            operation: OPERATION_PURGE_STANDBY.into(),
+            outcome: outcome.into(),
+            native_request_succeeded: native.request_succeeded,
+            elevation_used: native.elevated,
+            nt_status_hex: Some(format!("0x{:08X}", native.nt_status)),
+            before: Some(before),
+            after,
+            observed_reduction_bytes: reduction,
+            duration_ms: started.elapsed().as_millis() as u64,
+            native_duration_ms: native.duration_ms,
+            reason,
+        },
+    )
+}
+
+fn measurement(snapshot: &MemorySnapshot) -> ActionMeasurement {
+    ActionMeasurement {
+        standby_bytes: snapshot.standby_bytes.value,
+        free_zero_bytes: snapshot.free_zero_bytes.value,
+        available_bytes: snapshot.available_physical_bytes.value,
+    }
+}
+
+fn record_action(
+    app: &tauri::AppHandle,
+    state: &Arc<AppState>,
+    record: ActionRecord,
+) -> ActionRecord {
+    {
+        let mut history = state
+            .action_history
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if history.len() == ACTION_HISTORY_LIMIT {
+            history.pop_front();
+        }
+        history.push_back(record.clone());
+    }
+    if let Err(error) = app.emit(EVENT_ACTION, &record) {
+        log::warn!("Could not emit action result: {error}");
+    }
+    log::info!(
+        "Memory action completed: outcome={}, native_success={}, ntstatus={:?}, reduction_bytes={:?}",
+        record.outcome,
+        record.native_request_succeeded,
+        record.nt_status_hex,
+        record.observed_reduction_bytes
+    );
+    record
 }
 
 fn show_dashboard(app: &tauri::AppHandle) {
@@ -328,7 +547,9 @@ pub fn run() {
             get_settings,
             update_settings,
             set_monitoring_paused,
-            get_runtime_status
+            get_runtime_status,
+            get_action_history,
+            purge_standby_memory
         ])
         .setup(|app| {
             let settings_path = app.path().app_config_dir()?.join("settings.json");

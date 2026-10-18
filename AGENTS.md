@@ -9,30 +9,25 @@ This directory is a local mirror of the ChatGPT project “MemFlux”.
 
 ## Project instructions
 
-### Product identity and safety
+### Product direction
 
-- Preserve the MemFlux principle: **measure first, understand second, intervene only when justified, verify afterward**.
-- Build a native-feeling Windows 10/11 x64 utility with the Midnight CosmoTech™ identity. Prefer cohesive working vertical slices over broad placeholder scaffolding.
-- Never fabricate telemetry, benchmarks, action success, or performance improvements. Represent missing measurements as unavailable or degraded.
-- Do not expose standby-list clearing, timer manipulation, process trimming, or other system interventions as functional until the exact mechanism, compatibility, privileges, cleanup, and observed result have been verified.
-- Ordinary monitoring must run as a standard user. Do not run the main UI elevated, add a kernel driver, install a permanent privileged service, weaken Windows security, or add unrestricted shell execution.
+- MemFlux is a functional Windows standby-memory cleaner with monitoring and Guardian intelligence around the action. A monitoring-only build is not a completed product.
+- Preserve the working Tauri 2, React, Rust telemetry, settings, tray, and Midnight CosmoTech™ interface. Extend cohesive vertical slices; do not rebuild from scratch.
+- Full standby-list purging is the primary native operation. Never substitute `EmptyWorkingSet`, process trimming, or a fabricated counter change.
+- Report native request acceptance separately from measured before/after reduction. Never invent freed bytes or performance improvement.
 
-### Architecture
+### Privilege and compatibility boundary
 
-- Use Tauri 2, React, strict TypeScript, and Rust unless repository evidence justifies a documented exception.
-- Keep Windows collection, metric derivation, Guardian decisions, persistence, IPC, and presentation as explicit boundaries. The frontend is never the authority for unrestricted native actions.
-- Prefer documented Win32 APIs. Isolate any future unstable or undocumented API behind capability detection and an explicit unsupported state.
-- Keep collection independent of rendering. Use timed or event-driven sampling; never busy-wait.
-- Treat `MEMORYSTATUSEX.ullAvailPhys` as already including reclaimable standby, free, and zero pages. Never add standby to it.
-- Do not label page faults as hard faults. Use a documented hard-page-read signal such as `Memory\\Page Reads/sec` and keep source/availability metadata.
-- Persist small settings in a versioned, validated local format. Use atomic replacement and safe fallback to defaults on corruption.
+- Ordinary telemetry and the main UI stay unelevated. Privileged code must accept only explicit memory-list operations; no arbitrary commands, paths, driver, persistent unrestricted elevation, or security bypass.
+- The current operation is `NtSetSystemInformation(SystemMemoryListInformation=80, MemoryPurgeStandbyList=4)` after enabling `SeProfileSingleProcessPrivilege`.
+- Treat the memory-list information class and command as compatibility-sensitive native interfaces. Keep them isolated, return raw `NTSTATUS`, maintain an explicit tested-build allowlist, and disable actions outside it until validated.
+- Preserve direct user control. Automatic cleaning must remain opt-in and must use standby plus Free & Zero Page List thresholds—not available physical memory as a substitute.
 
 ### Engineering discipline
 
-- Keep Rust and TypeScript contracts synchronized and typed.
-- Add deterministic tests for calculations, Guardian reason codes and thresholds, settings migration/validation, capability gating, and native failure propagation.
-- Keep Tauri capabilities least-privilege. Do not add shell, network, filesystem, or process permissions without a concrete reviewed need.
-- Use semantic design tokens, accessible keyboard controls, clear loading/degraded states, reduced-motion support, and lightweight charts.
-- Update `MEMFLUX_IMPLEMENTATION_PLAN.md`, relevant docs, and `CHANGELOG.md` when implementation status changes. Distinguish implemented, tested, partial, planned, experimental, and unsupported work.
-- Before claiming a Windows feature verified, record the Windows edition/build, privilege level, observed result, and test method. A compile-only result is not runtime validation.
-- Preserve user changes and avoid destructive Git or filesystem operations. If Git metadata is absent, report that limitation rather than inventing history.
+- Serialize native actions. Capture pre/post telemetry, use a settling interval, retain bounded action history, and distinguish success, no observed reduction, skip, denial, unsupported, and failure states.
+- Keep Guardian pressure assessment separate from cleaner policy. Guardian may explain or recommend but must not silently override configured thresholds.
+- Add deterministic tests for action classification, settings, cooldown/frequency policy, exclusions, serialization, native status propagation, and unsupported capability gating.
+- Before claiming Windows functionality verified, record edition/build, elevation state, exact mechanism, raw native result, counter evidence, and method. Do not generalize one Insider-build result to Windows 10/11 broadly.
+- Update `MEMFLUX_IMPLEMENTATION_PLAN.md`, relevant docs, and `CHANGELOG.md` as milestones change. Mark implemented, tested, partial, untested, and blocked status explicitly.
+- Preserve user changes and the read-only `sources/` boundary. Avoid destructive Git and filesystem operations.

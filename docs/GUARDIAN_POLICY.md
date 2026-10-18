@@ -2,7 +2,7 @@
 
 ## Phase 1 status
 
-Implemented as a deterministic, monitoring-only evaluator. It can Observe or Recommend review. It has no Act outcome or native memory-action command.
+Implemented as a deterministic pressure evaluator. It can Observe or Recommend review. Manual standby cleaning is a separate explicit command; Guardian neither blocks it nor silently triggers it.
 
 ## Inputs
 
@@ -34,5 +34,5 @@ These thresholds are conservative starting policy, not universal Windows perform
 - Missing hard-read data lowers confidence but does not become zero.
 - Invalid core telemetry suspends evaluation.
 - Every result has a stable reason code, human explanation, confidence label, and evidence list.
-- `actionCapability` remains `unsupported_monitoring_only`.
+- `actionCapability` identifies the separate manual purge boundary. Future automatic cleaner policy must remain independently configurable and opt-in.
 

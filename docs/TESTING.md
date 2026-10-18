@@ -17,6 +17,7 @@ npm run tauri build -- --debug --no-bundle
 - Percentage arithmetic bounds results and rejects a zero denominator.
 - Guardian healthy outcome, three-sample critical hysteresis, hysteresis reset, and missing-core suspension.
 - Settings interval constraints, persisted round trip, invalid-file fallback, and preservation of malformed data.
+- Exact native constants, fixed helper argument, and tested-build capability gating.
 
 ## Native smoke checklist
 
@@ -31,6 +32,17 @@ npm run tauri build -- --debug --no-bundle
 9. Close to tray, reopen from tray, and verify one continuing sequence.
 10. Start a second instance and verify the original window focuses.
 11. Choose tray Exit and verify the process terminates.
+12. Invoke the cleaner, approve UAC, and verify raw status plus before/after standby and free/zero values.
+13. Repeat with little standby and verify no fictitious reduction is reported.
+14. Reject UAC and verify a cancellation result without crashing or changing the monitoring state.
+
+## Native cleaner evidence — build 26340
+
+- Direct unelevated helper: `STATUS_PRIVILEGE_NOT_HELD (0xC0000061)`.
+- Elevated fixed helper: `STATUS_SUCCESS (0x00000000)`.
+- Retained sample after 750 ms: standby 233,820,160 → 25,538,560 bytes; Free & Zero 10,254,319,616 → 10,510,528,512 bytes.
+- The first successful run caused a PowerShell reporting overflow after the action; it is acknowledged but not used as precise numerical evidence.
+- UAC rejection, UI-driven concurrency, background/tray action, and shutdown during action remain unverified.
 
 ## Required compatibility work
 

@@ -1,12 +1,14 @@
 # Security and Privacy
 
-## Phase 1 threat boundary
+## Cleaner threat boundary
 
-MemFlux monitors local Windows memory state. It does not modify memory lists, trim other processes, manipulate timers, contact a network service, or accept untrusted remote input.
+MemFlux monitors local Windows memory state and can request one full standby-list purge. It does not trim process working sets, manipulate timers, contact a network service, or accept untrusted remote input.
 
 ## Implemented controls
 
-- Standard-user process; no requested-execution-level elevation.
+- Standard-user main process; no requested-execution-level elevation.
+- One-shot UAC launch of the same executable with exactly `--memflux-elevated-purge-standby`.
+- Helper accepts no arbitrary command or filesystem path, enables only `SeProfileSingleProcessPrivilege`, performs one native request, and returns raw `NTSTATUS` as its process exit code.
 - No service, kernel driver, scheduled task, registry tweak, or privileged helper.
 - No arbitrary shell, process, filesystem, HTTP, or updater capability.
 - Tauri main-window capability is limited to `core:default`.
@@ -16,9 +18,9 @@ MemFlux monitors local Windows memory state. It does not modify memory lists, tr
 - Logs describe application state and native failures; they do not intentionally record secrets or process contents.
 - No account, analytics, or uploaded telemetry.
 
-## Future privileged action requirements
+## Compatibility controls
 
-Any future standby action must be a separately reviewed capability. It must identify the exact mechanism, privilege, supported build set, helper identity and IPC ACL, command allowlist, validation, cooldown, before/after data, and truthful failure result. The UI process must remain unelevated.
+The private memory-list class/command is enabled only on an explicit tested-build allowlist. Missing export, unlisted build, invalid telemetry, a concurrent action, elevation denial, missing privilege, timeout, and failed `NTSTATUS` each produce distinct non-success outcomes.
 
 The following remain prohibited: kernel drivers, security-feature disabling, command execution from frontend input, arbitrary filesystem access by an elevated helper, insecure deserialization, process injection, game/anti-cheat tampering, and fabricated success.
 

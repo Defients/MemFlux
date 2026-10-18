@@ -1,26 +1,37 @@
 # MemFlux
 
-**Adaptive Memory Intelligence · Powered by CosmoTech™**
+**Standby Memory Control + Adaptive Intelligence · Powered by CosmoTech™**
 
-MemFlux is a local-first Windows memory monitor built around one rule: measure first, understand second, intervene only when justified, and verify afterward.
+MemFlux is a local-first Windows standby-memory cleaning utility. It performs a real, privilege-gated Windows standby-list purge, measures the system before and after, and keeps monitoring and Guardian diagnostics around that core action.
 
-The current Phase 1 alpha collects real system memory data from documented Windows APIs, explains pressure through a deterministic monitoring-only Guardian, persists local settings, and continues efficient sampling from the system tray. It does **not** clear standby memory or claim to optimize performance.
+The current cleaner milestone is enabled only on the explicitly validated Windows build. Monitoring remains available without elevation; a manual purge launches the same binary in a narrow one-shot helper mode through Windows UAC.
 
-## Implemented now
+## Working cleaner milestone
+
+- Prominent **PURGE STANDBY MEMORY** control.
+- Native `NtSetSystemInformation` call using information class 80 and `MemoryPurgeStandbyList` command 4.
+- One-shot UAC helper that accepts only the fixed standby-purge operation and enables only `SeProfileSingleProcessPrivilege`.
+- Explicit capability detection and a tested-build allowlist; unsupported builds keep monitoring but disable the action.
+- Serialized actions with real standby, free/zero, and available-memory snapshots before and after a 750 ms settling interval.
+- Raw `NTSTATUS`, request success, measured reduction, duration, elevation path, and bounded in-session history.
+- Honest success-with-no-measurable-reduction reporting.
+
+## Monitoring foundation
 
 - Native `GlobalMemoryStatusEx` and `GetPerformanceInfo` collection.
 - Documented Windows low/high memory resource notifications.
 - PDH English counters for standby classes, free/zero pages, modified pages, and hard page reads.
 - Per-metric source, timestamp, interval, status, and failure detail.
-- Explainable Guardian with three-sample hysteresis and no action path.
+- Explainable Guardian pressure assessment kept separate from cleaner control.
 - Adaptive foreground/background sampling owned by Rust.
 - Versioned, validated, atomically replaced local settings.
 - System tray open, pause/resume, close-to-tray, explicit exit, and single instance.
 - Responsive Midnight CosmoTech™ Overview, Memory Explorer, Guardian, and Settings views.
 
-## Explicitly unsupported
+## Not implemented yet
 
-- Standby-list clearing and automatic memory intervention.
+- Opt-in automatic threshold cleaning, cooldown/frequency limits, and exclusions (Milestone 2).
+- Low-priority-only standby purge, pending independent native validation.
 - Timer-resolution changes.
 - Game overlays, PresentMon, performance sessions, and performance-improvement claims.
 - Windows versions other than those actually tested and recorded in the compatibility document.
@@ -47,9 +58,9 @@ See [MEMFLUX_IMPLEMENTATION_PLAN.md](MEMFLUX_IMPLEMENTATION_PLAN.md) for live mi
 
 ## Safety and privacy
 
-Monitoring runs as a standard user. MemFlux installs no service or driver, does not ask for elevation, opens no arbitrary shell path, and uploads no analytics or system telemetry. See [docs/SECURITY.md](docs/SECURITY.md).
+Monitoring runs as a standard user. Manual cleaning requests UAC only for a one-shot helper in the same executable. The helper accepts no arbitrary shell command or path, installs no service or driver, and returns only its native status through the process exit code. MemFlux uploads no analytics or system telemetry. See [docs/SECURITY.md](docs/SECURITY.md).
 
 ## Project maturity
 
-Phase 1 alpha. The implementation is a real native vertical slice, not a performance product claim. Stable Windows 10/11 compatibility, long-duration performance budgets, packaging, signing, and accessibility/DPI matrices remain release work.
+Milestone 1 cleaner alpha. Native purging is runtime-verified only on Windows 11 Home Insider Preview build 26340; other builds remain action-disabled until tested. Clearing cache is not a memory-leak fix and is not evidence of higher FPS or lower latency.
 

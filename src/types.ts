@@ -71,8 +71,40 @@ export interface SettingsEnvelope {
 
 export interface RuntimeStatus {
   paused: boolean;
-  actionCapability: string;
-  actionExplanation: string;
+  cleanerPaused: boolean;
+  actionCapability: ActionCapability;
+}
+
+export interface ActionCapability {
+  status: "ready" | "requires_elevation" | "unsupported";
+  supported: boolean;
+  requiresElevation: boolean;
+  osBuild: number | null;
+  mechanism: string;
+  explanation: string;
+}
+
+export interface ActionMeasurement {
+  standbyBytes: number | null;
+  freeZeroBytes: number | null;
+  availableBytes: number | null;
+}
+
+export interface ActionRecord {
+  id: string;
+  timestampMs: number;
+  origin: "manual" | "automatic";
+  operation: "purge_standby_list";
+  outcome: string;
+  nativeRequestSucceeded: boolean;
+  elevationUsed: boolean;
+  ntStatusHex: string | null;
+  before: ActionMeasurement | null;
+  after: ActionMeasurement | null;
+  observedReductionBytes: number | null;
+  durationMs: number;
+  nativeDurationMs: number;
+  reason: string;
 }
 
 export type PageId = "overview" | "explorer" | "guardian" | "settings";
