@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const ONE_HOUR_MS: u64 = 60 * 60 * 1_000;
 const QUOTA_RETENTION_LIMIT: usize = 256;
@@ -359,7 +359,18 @@ impl CleanerPolicy {
         }
     }
 
-    pub fn restore_completed_purges(&mut self, timestamps: impl Iterator<Item = u64>) {
+    /// Restores persisted purge timestamps. When `anchor` is provided (the
+    /// load path), each entry is back-dated on a synthetic monotonic timeline
+    /// so cooldown/rate expiry cannot be defeated by wall-clock changes:
+    /// elapsed time after load is measured monotonically, and the entry's
+    /// pre-load age is the clamped wall age. Entries already older than one
+    /// hour by the wall clock are pruned on restore. Timestamps in the future
+    /// clamp to the anchor (treated as just-completed — conservative).
+    fn restore_completed_purges_at(
+        &mut self,
+        timestamps: impl Iterator<Item = u64>,
+        anchor: Option<(u64, Instant)>,
+    ) {
         let mut timestamps = timestamps.collect::<Vec<_>>();
         timestamps.sort_unstable();
         timestamps.dedup();
@@ -368,11 +379,32 @@ impl CleanerPolicy {
         }
         self.completed_purges = timestamps
             .into_iter()
-            .map(|wall_timestamp_ms| CompletedPurgeEntry {
-                wall_timestamp_ms,
-                monotonic_instant: None,
+            .filter_map(|wall_timestamp_ms| {
+                let entry = if let Some((anchor_ms, anchor_instant)) = anchor {
+                    let clamped = wall_timestamp_ms.min(anchor_ms);
+                    let age_ms = anchor_ms.saturating_sub(clamped);
+                    if age_ms >= ONE_HOUR_MS {
+                        return None;
+                    }
+                    CompletedPurgeEntry {
+                        wall_timestamp_ms: clamped,
+                        monotonic_instant: anchor_instant
+                            .checked_sub(Duration::from_millis(age_ms)),
+                    }
+                } else {
+                    CompletedPurgeEntry {
+                        wall_timestamp_ms,
+                        monotonic_instant: None,
+                    }
+                };
+                Some(entry)
             })
             .collect();
+    }
+
+    #[cfg(test)]
+    pub fn restore_completed_purges(&mut self, timestamps: impl Iterator<Item = u64>) {
+        self.restore_completed_purges_at(timestamps, None);
     }
 
     pub fn load_quota_file(&mut self, path: &Path, history_timestamps: impl Iterator<Item = u64>) {
@@ -383,7 +415,8 @@ impl CleanerPolicy {
         {
             combined.extend(file.completed_timestamps_ms);
         }
-        self.restore_completed_purges(combined.into_iter());
+        let anchor = (crate::telemetry::timestamp_ms(), Instant::now());
+        self.restore_completed_purges_at(combined.into_iter(), Some(anchor));
     }
 
     pub fn persist_quota_file(&self, path: &Path) -> Result<(), String> {
@@ -569,5 +602,56 @@ mod tests {
             mono_policy.evaluate(&settings, jumped_inputs),
             CleanerDecision::MinimumInterval
         );
+    }
+
+    #[test]
+    fn quota_file_restore_anchors_entries_on_monotonic_clock() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let settings = eligible_settings();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("memflux-quota-test-{nonce}"));
+        let path = dir.join("cleaner-quota.json");
+        let now = crate::telemetry::timestamp_ms();
+        let journal = QuotaJournalFile {
+            schema_version: 1,
+            completed_timestamps_ms: vec![
+                now - 5_000,           // 5s ago — still inside cooldown
+                now + 60 * 60_000,     // 1h in the future — clamps to load moment
+                now - 2 * 60 * 60_000, // 2h ago — expired, must not count
+            ],
+        };
+        fs::create_dir_all(&dir).expect("mkdir");
+        fs::write(&path, serde_json::to_vec(&journal).expect("json")).expect("write");
+
+        let mut policy = CleanerPolicy::default();
+        policy.load_quota_file(&path, std::iter::empty());
+        // Two retained entries (future-clamped + recent) hit the hourly cap of 2.
+        assert_eq!(policy.completed_purges.len(), 2);
+
+        // Wall clock jumps 10h forward but only ~30s of real time passed:
+        // the last purge's cooldown must still hold because expiry is monotonic.
+        let jumped = CleanerInputs {
+            now_ms: now.saturating_add(10 * 60 * 60_000),
+            now_instant: Instant::now() + Duration::from_secs(30),
+            ..inputs(0)
+        };
+        assert_eq!(
+            policy.evaluate(&settings, jumped),
+            CleanerDecision::MinimumInterval // ~30s real elapsed < 300s minimum interval
+        );
+
+        // After the monotonic hour truly passes, entries expire.
+        let later = CleanerInputs {
+            now_ms: now.saturating_add(61 * 60_000),
+            now_instant: Instant::now() + Duration::from_secs(61 * 60),
+            ..inputs(0)
+        };
+        assert_eq!(policy.evaluate(&settings, later), CleanerDecision::Trigger);
+
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_dir(dir);
     }
 }

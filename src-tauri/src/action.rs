@@ -301,12 +301,16 @@ mod platform {
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use windows::Win32::Foundation::{
-        CloseHandle, ERROR_CANCELLED, ERROR_NOT_ALL_ASSIGNED, ERROR_PIPE_CONNECTED, GetLastError,
-        HANDLE, HLOCAL, LUID, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        CloseHandle, ERROR_CANCELLED, ERROR_IO_PENDING, ERROR_NOT_ALL_ASSIGNED,
+        ERROR_PIPE_CONNECTED, GetLastError, HANDLE, HLOCAL, LUID, LocalFree, WAIT_OBJECT_0,
+        WAIT_TIMEOUT,
     };
     use windows::Win32::Security::Authorization::{
         ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
         SDDL_REVISION_1,
+    };
+    use windows::Win32::Security::Cryptography::{
+        BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom,
     };
     use windows::Win32::Security::{
         AdjustTokenPrivileges, GetTokenInformation, LUID_AND_ATTRIBUTES, LookupPrivilegeValueW,
@@ -314,10 +318,11 @@ mod platform {
         TOKEN_ELEVATION, TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER, TokenElevation, TokenUser,
     };
     use windows::Win32::Storage::FileSystem::{
-        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_GENERIC_READ,
-        FILE_GENERIC_WRITE, FILE_SHARE_NONE, FlushFileBuffers, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
+        CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED,
+        FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_NONE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
         ReadFile, WriteFile,
     };
+    use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
     use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
     use windows::Win32::System::Pipes::{
         ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
@@ -328,8 +333,8 @@ mod platform {
         HKEY_LOCAL_MACHINE, KEY_READ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
     };
     use windows::Win32::System::Threading::{
-        GetCurrentProcess, GetCurrentProcessId, GetExitCodeProcess, GetProcessId, OpenProcess,
-        OpenProcessToken, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+        CreateEventW, GetCurrentProcess, GetCurrentProcessId, GetExitCodeProcess, GetProcessId,
+        OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
         PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW, WaitForSingleObject,
     };
     use windows::Win32::UI::Shell::{
@@ -600,12 +605,8 @@ mod platform {
 
         let controller_pid = unsafe { GetCurrentProcessId() };
         let now_ms = crate::telemetry::timestamp_ms();
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(now_ms as u128);
-        let session_id = format!("{controller_pid:08x}{nonce:024x}");
-        let pipe_name = format!(r"\\.\pipe\MemFluxSession_{controller_pid}_{now_ms}");
+        let (session_id, pipe_suffix) = generate_session_material();
+        let pipe_name = format!(r"\\.\pipe\MemFluxSession_{controller_pid}_{pipe_suffix}");
 
         let executable = match std::env::current_exe() {
             Ok(path) => path,
@@ -757,6 +758,39 @@ mod platform {
         }
     }
 
+    /// Session credentials come from the Windows CSPRNG so a co-resident
+    /// unelevated process cannot predict the session id or pipe name. The
+    /// (id, pipe-suffix) pair uses independent buffers; the pipe suffix only
+    /// needs collision resistance, the session id needs unguessability.
+    fn generate_session_material() -> (String, String) {
+        let mut session_bytes = [0_u8; 16];
+        let mut pipe_bytes = [0_u8; 8];
+        let session_ok =
+            unsafe { BCryptGenRandom(None, &mut session_bytes, BCRYPT_USE_SYSTEM_PREFERRED_RNG) }
+                .is_ok();
+        let pipe_ok =
+            unsafe { BCryptGenRandom(None, &mut pipe_bytes, BCRYPT_USE_SYSTEM_PREFERRED_RNG) }
+                .is_ok();
+        let hex = |bytes: &[u8]| -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() };
+        if session_ok && pipe_ok {
+            return (hex(&session_bytes), hex(&pipe_bytes));
+        }
+        // Non-cryptographic fallback; still unique-enough because pipe security
+        // is enforced by the DACL + peer PID/image checks, not name secrecy.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let seq = SESSION_REQUEST_SEQ.fetch_add(1, Ordering::Relaxed);
+        (
+            format!("{nanos:032x}"),
+            format!(
+                "{:016x}",
+                nanos ^ ((seq as u128) << 64) ^ nanos.rotate_left(64)
+            ),
+        )
+    }
+
     fn try_execute_via_active_session(started: Instant) -> Option<NativeActionResult> {
         let (pipe_name, session_id, helper_pid) = {
             let mut guard = ACTIVE_SESSION
@@ -806,11 +840,202 @@ mod platform {
                     nt_status: None,
                     request_succeeded: false,
                     elevation_used: true,
-                    late_completion_possible: false,
+                    // The request may have reached the helper before the
+                    // transport failed; we cannot prove it did not execute.
+                    late_completion_possible: true,
                     duration_ms: started.elapsed().as_millis() as u64,
-                    detail: format!("Session helper IPC failed and session was closed: {error}"),
+                    detail: format!(
+                        "Session helper IPC failed and session was closed; the purge request may have completed without an observable result: {error}"
+                    ),
                 })
             }
+        }
+    }
+
+    const IPC_IO_POLL_MS: u32 = 50;
+    const HELPER_REQUEST_READ_BUDGET_MS: u64 = 15_000;
+    const HELPER_RESPONSE_WRITE_BUDGET_MS: u64 = 5_000;
+    const HELPER_ACCEPT_POLL_MS: u32 = 200;
+
+    fn create_ipc_event() -> Result<OwnedHandle, String> {
+        unsafe { CreateEventW(None, true, false, None) }
+            .map(OwnedHandle)
+            .map_err(|e| format!("CreateEventW for pipe I/O failed: {e}"))
+    }
+
+    /// Wait for an overlapped operation against `io_handle`, polling in slices
+    /// so the overall deadline and an optional cancellation flag both apply.
+    /// On timeout or cancellation the I/O is cancelled via CancelIoEx so the
+    /// OS cannot complete a stale write into a dropped buffer.
+    fn wait_for_overlapped(
+        io_handle: HANDLE,
+        event: HANDLE,
+        overlapped: &mut OVERLAPPED,
+        deadline: Instant,
+        cancel_flag: Option<&AtomicBool>,
+    ) -> Result<u32, String> {
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                let _ = unsafe { CancelIoEx(io_handle, Some(overlapped)) };
+                return Err("Timed out waiting for session-helper pipe I/O.".into());
+            }
+            let remaining_ms = deadline
+                .saturating_duration_since(now)
+                .as_millis()
+                .min(IPC_IO_POLL_MS as u128)
+                .max(1) as u32;
+            let signaled = unsafe { WaitForSingleObject(event, remaining_ms) };
+            if signaled == WAIT_OBJECT_0 {
+                let mut transferred = 0_u32;
+                unsafe { GetOverlappedResult(io_handle, overlapped, &mut transferred, false) }
+                    .map_err(|e| format!("Overlapped pipe I/O failed: {e}"))?;
+                return Ok(transferred);
+            }
+            if signaled == WAIT_TIMEOUT {
+                if cancel_flag.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+                    let _ = unsafe { CancelIoEx(io_handle, Some(overlapped)) };
+                    return Err("Session-helper pipe I/O cancelled.".into());
+                }
+                continue;
+            }
+            let _ = unsafe { CancelIoEx(io_handle, Some(overlapped)) };
+            return Err(format!("Wait on session-helper pipe failed: {signaled:?}"));
+        }
+    }
+
+    fn overlapped_write(
+        handle: HANDLE,
+        event: HANDLE,
+        payload: &[u8],
+        deadline: Instant,
+        cancel_flag: Option<&AtomicBool>,
+    ) -> Result<u32, String> {
+        let mut overlapped = OVERLAPPED {
+            hEvent: event,
+            ..Default::default()
+        };
+        let mut written = 0_u32;
+        match unsafe {
+            WriteFile(
+                handle,
+                Some(payload),
+                Some(&mut written),
+                Some(&mut overlapped),
+            )
+        } {
+            Ok(()) => Ok(written),
+            Err(err) if err.code().0 as u32 == (0x8007_0000 | ERROR_IO_PENDING.0) => {
+                wait_for_overlapped(handle, event, &mut overlapped, deadline, cancel_flag)
+            }
+            Err(err) => Err(format!("WriteFile to session pipe failed: {err}")),
+        }
+    }
+
+    fn overlapped_read(
+        handle: HANDLE,
+        event: HANDLE,
+        buffer: &mut [u8],
+        deadline: Instant,
+        cancel_flag: Option<&AtomicBool>,
+    ) -> Result<u32, String> {
+        let mut overlapped = OVERLAPPED {
+            hEvent: event,
+            ..Default::default()
+        };
+        let mut read = 0_u32;
+        match unsafe { ReadFile(handle, Some(buffer), Some(&mut read), Some(&mut overlapped)) } {
+            Ok(()) => Ok(read),
+            Err(err) if err.code().0 as u32 == (0x8007_0000 | ERROR_IO_PENDING.0) => {
+                wait_for_overlapped(handle, event, &mut overlapped, deadline, cancel_flag)
+            }
+            Err(err) => Err(format!("ReadFile from session pipe failed: {err}")),
+        }
+    }
+
+    /// Validate and execute one fixed IPC operation. Request ids must be
+    /// strictly increasing within the session so a replayed or duplicated
+    /// message cannot trigger a second purge. Returns (response, exit?).
+    fn dispatch_request(
+        request: &SessionIpcRequest,
+        session_id: &str,
+        helper_pid: u32,
+        last_request_id: &mut u64,
+        purge_fn: fn() -> u32,
+    ) -> (SessionIpcResponse, bool) {
+        fn rejection(session_id: &str, helper_pid: u32, detail: &str) -> SessionIpcResponse {
+            SessionIpcResponse {
+                protocol_version: SESSION_PROTOCOL_VERSION,
+                session_id: session_id.to_owned(),
+                request_id: 0,
+                accepted: false,
+                nt_status: Some(STATUS_ACCESS_DENIED),
+                helper_pid,
+                detail: detail.into(),
+            }
+        }
+        if request.protocol_version != SESSION_PROTOCOL_VERSION || request.session_id != session_id
+        {
+            return (
+                rejection(
+                    session_id,
+                    helper_pid,
+                    "Rejected invalid session helper IPC request.",
+                ),
+                false,
+            );
+        }
+        if request.request_id <= *last_request_id {
+            return (
+                rejection(
+                    session_id,
+                    helper_pid,
+                    "Rejected replayed or out-of-order IPC request id.",
+                ),
+                false,
+            );
+        }
+        *last_request_id = request.request_id;
+        match request.operation {
+            SessionOperation::Ping => (
+                SessionIpcResponse {
+                    protocol_version: SESSION_PROTOCOL_VERSION,
+                    session_id: session_id.to_owned(),
+                    request_id: request.request_id,
+                    accepted: true,
+                    nt_status: None,
+                    helper_pid,
+                    detail: "Authenticated session helper ready.".into(),
+                },
+                false,
+            ),
+            SessionOperation::PurgeStandbyList => {
+                let status = purge_fn();
+                (
+                    SessionIpcResponse {
+                        protocol_version: SESSION_PROTOCOL_VERSION,
+                        session_id: session_id.to_owned(),
+                        request_id: request.request_id,
+                        accepted: nt_success(status),
+                        nt_status: Some(status),
+                        helper_pid,
+                        detail: status_detail(status),
+                    },
+                    false,
+                )
+            }
+            SessionOperation::Shutdown => (
+                SessionIpcResponse {
+                    protocol_version: SESSION_PROTOCOL_VERSION,
+                    session_id: session_id.to_owned(),
+                    request_id: request.request_id,
+                    accepted: true,
+                    nt_status: None,
+                    helper_pid,
+                    detail: "Session helper shutting down.".into(),
+                },
+                true,
+            ),
         }
     }
 
@@ -825,6 +1050,7 @@ mod platform {
         let deadline = Instant::now() + std::time::Duration::from_millis(timeout_ms as u64);
 
         let raw_handle = loop {
+            // FILE_FLAG_OVERLAPPED lets us bound every pipe operation below.
             let handle = unsafe {
                 CreateFileW(
                     PCWSTR(pipe_wide.as_ptr()),
@@ -832,7 +1058,7 @@ mod platform {
                     FILE_SHARE_NONE,
                     None,
                     OPEN_EXISTING,
-                    FILE_ATTRIBUTE_NORMAL,
+                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
                     None,
                 )
             };
@@ -848,6 +1074,7 @@ mod platform {
             }
         };
         let pipe = OwnedHandle(raw_handle);
+        let event = create_ipc_event()?;
 
         // Verify server process identity
         let mut server_pid = 0_u32;
@@ -872,15 +1099,10 @@ mod platform {
             return Err("IPC request exceeds maximum message size.".into());
         }
 
-        let mut written = 0_u32;
-        unsafe { WriteFile(pipe.0, Some(&payload), Some(&mut written), None) }
-            .map_err(|e| format!("WriteFile to session pipe failed: {e}"))?;
-        let _ = unsafe { FlushFileBuffers(pipe.0) };
+        overlapped_write(pipe.0, event.0, &payload, deadline, None)?;
 
         let mut buffer = vec![0_u8; MAX_IPC_MESSAGE_BYTES];
-        let mut read = 0_u32;
-        unsafe { ReadFile(pipe.0, Some(&mut buffer), Some(&mut read), None) }
-            .map_err(|e| format!("ReadFile from session pipe failed: {e}"))?;
+        let read = overlapped_read(pipe.0, event.0, &mut buffer, deadline, None)?;
 
         let response: SessionIpcResponse = serde_json::from_slice(&buffer[..read as usize])
             .map_err(|e| format!("Invalid IPC response JSON: {e}"))?;
@@ -954,10 +1176,12 @@ mod platform {
         };
 
         let pipe_wide: Vec<u16> = pipe_name.encode_utf16().chain(Some(0)).collect();
+        // FILE_FLAG_OVERLAPPED: accept/read/write all run through bounded waits
+        // so the controller watchdog and Shutdown request always take effect.
         let raw_pipe = unsafe {
             CreateNamedPipeW(
                 PCWSTR(pipe_wide.as_ptr()),
-                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE | FILE_FLAG_OVERLAPPED,
                 PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 1,
                 MAX_IPC_MESSAGE_BYTES as u32,
@@ -972,12 +1196,44 @@ mod platform {
         let pipe = OwnedHandle(raw_pipe);
         drop(security_descriptor);
 
+        let event = match create_ipc_event() {
+            Ok(event) => event,
+            Err(_) => return STATUS_ACCESS_DENIED,
+        };
         let helper_pid = unsafe { GetCurrentProcessId() };
+        let mut last_request_id = 0_u64;
 
         while !shutdown_flag.load(Ordering::SeqCst) {
-            let connected = match unsafe { ConnectNamedPipe(pipe.0, None) } {
+            // Bounded accept: poll the shutdown flag while a client connects.
+            let mut overlapped = OVERLAPPED {
+                hEvent: event.0,
+                ..Default::default()
+            };
+            let connected = match unsafe { ConnectNamedPipe(pipe.0, Some(&mut overlapped)) } {
                 Ok(()) => true,
-                Err(err) => err.code().0 as u32 == (0x8007_0000 | ERROR_PIPE_CONNECTED.0),
+                Err(err) if err.code().0 as u32 == (0x8007_0000 | ERROR_PIPE_CONNECTED.0) => true,
+                Err(err) if err.code().0 as u32 == (0x8007_0000 | ERROR_IO_PENDING.0) => {
+                    let mut accepted = false;
+                    while !shutdown_flag.load(Ordering::SeqCst) {
+                        let wait = unsafe { WaitForSingleObject(event.0, HELPER_ACCEPT_POLL_MS) };
+                        if wait == WAIT_OBJECT_0 {
+                            let mut transferred = 0_u32;
+                            accepted = unsafe {
+                                GetOverlappedResult(pipe.0, &overlapped, &mut transferred, false)
+                            }
+                            .is_ok();
+                            break;
+                        }
+                        if wait != WAIT_TIMEOUT {
+                            break;
+                        }
+                    }
+                    if !accepted && !shutdown_flag.load(Ordering::SeqCst) {
+                        let _ = unsafe { CancelIoEx(pipe.0, Some(&overlapped)) };
+                    }
+                    accepted
+                }
+                Err(_) => false,
             };
             if !connected || shutdown_flag.load(Ordering::SeqCst) {
                 let _ = unsafe { DisconnectNamedPipe(pipe.0) };
@@ -995,89 +1251,67 @@ mod platform {
                 continue;
             }
 
+            // A legitimate controller writes its request immediately; bound the
+            // wait so a connected-but-silent peer cannot hold the helper open.
             let mut buffer = vec![0_u8; MAX_IPC_MESSAGE_BYTES];
-            let mut bytes_read = 0_u32;
-            let read_ok =
-                unsafe { ReadFile(pipe.0, Some(&mut buffer), Some(&mut bytes_read), None) }.is_ok()
-                    && bytes_read > 0
-                    && (bytes_read as usize) <= MAX_IPC_MESSAGE_BYTES;
+            let request_deadline =
+                Instant::now() + std::time::Duration::from_millis(HELPER_REQUEST_READ_BUDGET_MS);
+            let bytes_read = overlapped_read(
+                pipe.0,
+                event.0,
+                &mut buffer,
+                request_deadline,
+                Some(shutdown_flag.as_ref()),
+            );
 
-            if read_ok {
-                let (response, should_exit) = match serde_json::from_slice::<SessionIpcRequest>(
-                    &buffer[..bytes_read as usize],
-                ) {
-                    Ok(req)
-                        if req.protocol_version == SESSION_PROTOCOL_VERSION
-                            && req.session_id == session_id =>
-                    {
-                        match req.operation {
-                            SessionOperation::Ping => (
-                                SessionIpcResponse {
-                                    protocol_version: SESSION_PROTOCOL_VERSION,
-                                    session_id: session_id.to_owned(),
-                                    request_id: req.request_id,
-                                    accepted: true,
-                                    nt_status: None,
-                                    helper_pid,
-                                    detail: "Authenticated session helper ready.".into(),
-                                },
-                                false,
-                            ),
-                            SessionOperation::PurgeStandbyList => {
-                                let status = purge_fn();
-                                (
-                                    SessionIpcResponse {
-                                        protocol_version: SESSION_PROTOCOL_VERSION,
-                                        session_id: session_id.to_owned(),
-                                        request_id: req.request_id,
-                                        accepted: nt_success(status),
-                                        nt_status: Some(status),
-                                        helper_pid,
-                                        detail: status_detail(status),
-                                    },
-                                    false,
-                                )
-                            }
-                            SessionOperation::Shutdown => (
-                                SessionIpcResponse {
-                                    protocol_version: SESSION_PROTOCOL_VERSION,
-                                    session_id: session_id.to_owned(),
-                                    request_id: req.request_id,
-                                    accepted: true,
-                                    nt_status: None,
-                                    helper_pid,
-                                    detail: "Session helper shutting down.".into(),
-                                },
-                                true,
-                            ),
-                        }
+            let request = match bytes_read {
+                Ok(n) if n > 0 && (n as usize) <= MAX_IPC_MESSAGE_BYTES => {
+                    serde_json::from_slice::<SessionIpcRequest>(&buffer[..n as usize])
+                }
+                _ => {
+                    let _ = unsafe { DisconnectNamedPipe(pipe.0) };
+                    if shutdown_flag.load(Ordering::SeqCst) {
+                        break;
                     }
-                    _ => (
-                        SessionIpcResponse {
-                            protocol_version: SESSION_PROTOCOL_VERSION,
-                            session_id: session_id.to_owned(),
-                            request_id: 0,
-                            accepted: false,
-                            nt_status: Some(STATUS_ACCESS_DENIED),
-                            helper_pid,
-                            detail: "Rejected invalid session helper IPC request.".into(),
-                        },
-                        false,
-                    ),
-                };
+                    continue;
+                }
+            };
 
-                if let Ok(bytes) = serde_json::to_vec(&response) {
-                    let mut written = 0_u32;
-                    let _ = unsafe { WriteFile(pipe.0, Some(&bytes), Some(&mut written), None) };
-                    let _ = unsafe { FlushFileBuffers(pipe.0) };
+            let (response, should_exit) = match request {
+                Ok(req) => {
+                    dispatch_request(&req, session_id, helper_pid, &mut last_request_id, purge_fn)
                 }
-                let _ = unsafe { DisconnectNamedPipe(pipe.0) };
-                if should_exit {
-                    shutdown_flag.store(true, Ordering::SeqCst);
-                    break;
-                }
-            } else {
-                let _ = unsafe { DisconnectNamedPipe(pipe.0) };
+                Err(_) => (
+                    SessionIpcResponse {
+                        protocol_version: SESSION_PROTOCOL_VERSION,
+                        session_id: session_id.to_owned(),
+                        request_id: 0,
+                        accepted: false,
+                        nt_status: Some(STATUS_ACCESS_DENIED),
+                        helper_pid,
+                        detail: "Rejected unparseable session helper IPC request.".into(),
+                    },
+                    false,
+                ),
+            };
+
+            if let Ok(bytes) = serde_json::to_vec(&response) {
+                let write_deadline = Instant::now()
+                    + std::time::Duration::from_millis(HELPER_RESPONSE_WRITE_BUDGET_MS);
+                let _ = overlapped_write(
+                    pipe.0,
+                    event.0,
+                    &bytes,
+                    write_deadline,
+                    Some(shutdown_flag.as_ref()),
+                );
+            }
+            // Data already in the pipe buffer remains readable by the client
+            // after DisconnectNamedPipe; no blocking flush needed.
+            let _ = unsafe { DisconnectNamedPipe(pipe.0) };
+            if should_exit {
+                shutdown_flag.store(true, Ordering::SeqCst);
+                break;
             }
         }
         0
@@ -1603,6 +1837,96 @@ mod platform {
             assert!(shutdown.accepted);
 
             assert_eq!(handle.join().expect("server thread exit"), 0);
+        }
+
+        fn request(id: u64, op: SessionOperation) -> SessionIpcRequest {
+            SessionIpcRequest {
+                protocol_version: SESSION_PROTOCOL_VERSION,
+                session_id: "abcdef0123456789abcdef0123456789".into(),
+                request_id: id,
+                operation: op,
+            }
+        }
+
+        #[test]
+        fn dispatch_enforces_strictly_increasing_request_ids() {
+            let session = "abcdef0123456789abcdef0123456789";
+            let mut last = 0_u64;
+            let (first, _) = dispatch_request(
+                &request(1, SessionOperation::Ping),
+                session,
+                7,
+                &mut last,
+                || 0,
+            );
+            assert!(first.accepted);
+            assert_eq!(first.request_id, 1);
+
+            // Replayed request id is rejected without executing the operation.
+            let (replay, exit) = dispatch_request(
+                &request(1, SessionOperation::Shutdown),
+                session,
+                7,
+                &mut last,
+                || panic!("purge must not run on replay"),
+            );
+            assert!(!replay.accepted);
+            assert!(!exit);
+
+            // Out-of-order (lower) id is rejected even for valid operations.
+            let (stale, _) = dispatch_request(
+                &request(0, SessionOperation::PurgeStandbyList),
+                session,
+                7,
+                &mut last,
+                || panic!("purge must not run on stale id"),
+            );
+            assert!(!stale.accepted);
+
+            let (next, exit) = dispatch_request(
+                &request(2, SessionOperation::Shutdown),
+                session,
+                7,
+                &mut last,
+                || 0,
+            );
+            assert!(next.accepted);
+            assert!(exit);
+        }
+
+        #[test]
+        fn dispatch_rejects_wrong_session_identity() {
+            let mut last = 0_u64;
+            let mut bad = request(1, SessionOperation::Ping);
+            bad.session_id = "ffffffffffffffffffffffffffffffff".into();
+            let (resp, _) =
+                dispatch_request(&bad, "abcdef0123456789abcdef0123456789", 7, &mut last, || 0);
+            assert!(!resp.accepted);
+            assert_eq!(resp.nt_status, Some(STATUS_ACCESS_DENIED));
+
+            let mut wrong_version = request(2, SessionOperation::Ping);
+            wrong_version.protocol_version = SESSION_PROTOCOL_VERSION + 9;
+            let (resp2, _) = dispatch_request(
+                &wrong_version,
+                "abcdef0123456789abcdef0123456789",
+                7,
+                &mut last,
+                || 0,
+            );
+            assert!(!resp2.accepted);
+        }
+
+        #[test]
+        fn session_material_is_unpredictable_and_hex() {
+            let (id_a, pipe_a) = generate_session_material();
+            let (id_b, pipe_b) = generate_session_material();
+            assert_eq!(id_a.len(), 32);
+            assert_eq!(pipe_a.len(), 16);
+            assert!(id_a.bytes().all(|b| b.is_ascii_hexdigit()));
+            assert!(pipe_a.bytes().all(|b| b.is_ascii_hexdigit()));
+            // CSPRNG material must not repeat between sessions.
+            assert_ne!(id_a, id_b);
+            assert_ne!(pipe_a, pipe_b);
         }
     }
 }

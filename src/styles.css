@@ -261,6 +261,7 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
 .tag-available { border-color: rgba(119, 217, 180, .25); color: var(--status-success); }
 .tag-warming_up { border-color: rgba(120, 190, 255, .25); color: var(--accent-secondary); }
 .tag-unavailable { border-color: rgba(240, 195, 108, .25); color: var(--status-warning); }
+.tag-degraded { border-color: rgba(120, 190, 255, .30); color: var(--accent-secondary); }
 .tag-error { border-color: rgba(241, 120, 148, .25); color: var(--status-danger); }
 .sensor-detail { display: block !important; max-width: 280px; margin-top: 5px !important; line-height: 1.4; }
 .explainer-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
@@ -403,4 +404,83 @@ html[data-motion="reduced"] *::after { scroll-behavior: auto !important; animati
   .page-stack { padding: 23px 20px 32px; }
   .guardian-grid, .settings-grid { grid-template-columns: 1fr; }
   .policy-strip small { display: none; }
+}
+
+/* V4.2 Mini HUD — frameless always-on-top surface */
+.minihud-root {
+  width: 100vw;
+  height: 100vh;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px 9px;
+  background: rgba(16, 13, 32, .82);
+  border: 1px solid var(--border-subtle, rgba(148, 130, 200, .28));
+  border-radius: 12px;
+  color: var(--text-primary, #f3eeff);
+  font: 600 9px/1.2 "Segoe UI", system-ui, sans-serif;
+  overflow: hidden;
+  user-select: none;
+}
+.minihud-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  -webkit-app-region: drag;
+  cursor: move;
+}
+.minihud-title {
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--accent-secondary, #78beff);
+}
+.minihud-close {
+  -webkit-app-region: no-drag;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim, #9f95c7);
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+.minihud-close:hover { color: var(--status-danger, #f17894); }
+.minihud-grid {
+  display: grid;
+  gap: 5px;
+  flex: 1;
+}
+.minihud-grid.preset-minimal { grid-template-columns: repeat(2, 1fr); }
+.minihud-grid.preset-compact { grid-template-columns: repeat(2, 1fr); }
+.minihud-grid.preset-detailed { grid-template-columns: repeat(3, 1fr); }
+.minihud-cell {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  padding: 4px 7px;
+  background: rgba(30, 25, 55, .55);
+  border-radius: 8px;
+  min-width: 0;
+}
+.minihud-cell span {
+  font-size: 7px;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--text-dim, #9f95c7);
+}
+.minihud-cell strong {
+  font-size: 13px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+.minihud-footer {
+  font-size: 7.5px;
+  color: var(--text-dim, #9f95c7);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }

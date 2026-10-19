@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased — MemFlux V4.2 Reliability, Recovery & Performance Proof
+
+### Added
+
+- **Coordinated shutdown lifecycle (`app.rs`):** Ordered teardown — refuse new actions → drain in-flight action (≤3 s) → stop PresentMon/ETW capture → restore system state (GameFocus + Rewind journal obligations via `coordinator.shutdown_and_restore`) → revoke the privileged session helper → flush persistence (action history, pending Mini HUD position). Tray Exit, window close, and `RunEvent::Exit` all converge on the same idempotent path; commands gate on the shutdown flag.
+- **Rewind V2 state machine (`rewind.rs`):** Explicit lifecycle `Prepared → AppliedVerified | OutcomeUncertain | FailedBeforeMutation`, restoration side `RestorationPending → Restored | ExternalChangePreserved`, `RecoveryRequired`, `Irreversible`. Journal eviction now protects unresolved obligations; schema v1 journals migrate (`failed → outcome_uncertain`, `conflict_skipped → external_change_preserved`, `pending → prepared`).
+- **Shutdown-time restoration (`coordinator.rs`):** `shutdown_and_restore` closes the GameFocus session, then reconciles every unresolved journal entry against live Windows state — `AppliedVerified`/`OutcomeUncertain`/`RestorationPending`/`RecoveryRequired` are all restored with compare-before-restore external-change preservation. Per-tick transitions gate on the shutdown flag.
+- **Session-helper IPC hardening (`action.rs`):** Session ID + pipe suffix now derive from `BCryptGenRandom` (32-hex-char CSPRNG material) instead of PID+timestamp; all client and server pipe I/O uses `FILE_FLAG_OVERLAPPED` with bounded `WaitForSingleObject` + `CancelIoEx` (connect/read/write/shutdown all bounded); server enforces strictly increasing `request_id` (replay/reorder rejected); IPC failure mid-purge sets `late_completion_possible = true`.
+- **Monotonic quota restore (`cleaner.rs`):** Persisted wall-clock quota timestamps are anchored to `Instant` at load with clamped age; clock rollback can no longer bypass cooldown or hourly limits and future timestamps never over-block.
+- **PresentMon provider repair (`performance.rs`):** Unique `--session_name MemFlux_<random>` replaces `--stop_existing_session`; `--terminate_on_proc_exit` when supported; capability probing parses `--help`; quoted-field CSV parser with header-name indexing; target PID + creation-time identity tracking rejects stale frames on PID reuse; empty WDDM counter sets now report unavailable instead of a fabricated 0%.
+- **Stutter Detective (`stutter.rs`):** Online detector over verified `MsBetweenPresents` frames — rolling ≥64-frame p95 baseline, flag threshold `max(p95 × 1.8, p95 + 7 ms)`, dropped presents flagged separately, anomalous frames excluded from baseline so sustained degradation still reports. Events surface in `FpsCaptureStatus.recent_stutters` and the Intelligence page correlates each event with timestamp-matched CPU/GPU/memory telemetry (correlation only, never causation).
+- **Performance Proof (`proof.rs`):** Opt-in measurement workflow — begin baseline → apply change → mark boundary → finish & compare. Mean ± stddev comparison per metric (CPU, GPU, RAM, FPS, frame time, p99) with `measurable`/`inconclusive` confidence and explicit same-workload caveats; verdicts never claim proof of causation.
+- **Ultra-Light Tray Mode (`app.rs`, settings v5):** Opt-in `ultra_light_tray_mode` — closing the dashboard with close-to-tray destroys the `main` webview entirely; native sampler, cleaner policy, and restoration keep running; tray "Open dashboard" recreates the window on demand.
+- **Independent Mini HUD (`app.rs`, `MiniHud.tsx`):** Frameless transparent always-on-top `minihud` webview sharing the same bundle (`?hud=mini`) and the same native telemetry event stream — no dedicated sensor pipeline. Presets (minimal/compact/detailed), opacity, always-on-top, click-through, position persistence with throttled writes, tray toggle, and close-to-disable persistence.
+
+### Verification
+
+- 54 Rust tests (rewind recovery/migration/retention, IPC auth/replay/timeout/session-material, quota clocks, PresentMon parse/attribution, GPU empty-set, CPU deltas, stutter detection, proof comparison, shutdown gating) — all green. 5 frontend tests green; `tsc -b` + `vite build` clean; `cargo clippy` 0 warnings.
+- **Untested on this pass:** real PresentMon capture against a game on this host, interactive UAC/tray flows, multi-hour soak, stable Windows 10/11 builds (still gated in `SUPPORTED_BUILDS`).
+
 ## Unreleased — MemFlux V4.1 Core Completion & Beta Candidate
 
 ### Added

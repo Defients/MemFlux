@@ -42,6 +42,26 @@ export interface GpuTelemetry {
   engineBreakdown: GpuEngineBreakdown | null;
 }
 
+export type StutterSeverity = "dropped_present" | "mild" | "moderate" | "severe";
+
+export interface StutterEvent {
+  id: string;
+  atMs: number;
+  frameTimeMs: number;
+  baselineP95Ms: number;
+  ratio: number;
+  dropped: boolean;
+  severity: StutterSeverity;
+  note: string;
+}
+
+export interface StutterSummary {
+  eventsLastMinute: number;
+  worstRatioLastMinute: number | null;
+  baselineP95Ms: number | null;
+  baselineFrames: number;
+}
+
 export interface FpsCaptureStatus {
   active: boolean;
   providerAvailable: boolean;
@@ -51,7 +71,34 @@ export interface FpsCaptureStatus {
   fps: Metric;
   frameTimeMs: Metric;
   frameTimeP99Ms: number | null;
+  recentStutters: StutterEvent[];
+  stutterSummary: StutterSummary | null;
   statusDetail: string;
+}
+
+export type ProofPhase = "baseline" | "post_change";
+
+export interface MetricComparison {
+  metric: string;
+  unit: string;
+  baselineMean: number;
+  baselineStddev: number;
+  postMean: number;
+  postStddev: number;
+  delta: number;
+  direction: "improved" | "regressed" | "within_noise" | string;
+  confidence: "measurable" | "inconclusive" | string;
+  detail: string;
+}
+
+export interface ProofReport {
+  active: boolean;
+  phase: ProofPhase | null;
+  baselineSamples: number;
+  postSamples: number;
+  comparisons: MetricComparison[];
+  verdict: string;
+  caveat: string;
 }
 
 export interface MemorySnapshot {
@@ -194,7 +241,32 @@ export interface PowerSupplyStatus {
   warning: string | null;
 }
 
-export type RewindStatus = "pending" | "active" | "restored" | "conflict_skipped" | "failed" | "irreversible";
+export type RewindStatus =
+  | "prepared"
+  | "applied_verified"
+  | "outcome_uncertain"
+  | "restoration_pending"
+  | "restored"
+  | "external_change_preserved"
+  | "recovery_required"
+  | "failed_before_mutation"
+  | "irreversible"
+  // Legacy v1 journal states still readable from disk
+  | "pending"
+  | "active"
+  | "conflict_skipped"
+  | "failed";
+
+export type ShutdownPhase =
+  | "running"
+  | "shutdown_requested"
+  | "draining_actions"
+  | "stopping_capture"
+  | "restoring_system_state"
+  | "stopping_privileged_helper"
+  | "flushing_persistence"
+  | "shutdown_complete"
+  | "shutdown_degraded";
 
 export interface RewindEntry {
   actionId: string;
@@ -301,6 +373,16 @@ export interface AppSettings {
   powershiftAllowOnBattery?: boolean;
   gameProfiles?: GameProfile[];
   onboardingCompleted?: boolean;
+  /** V4.2: destroy the dashboard webview when closed to tray (recreates on open). */
+  ultraLightTrayMode?: boolean;
+  miniHudEnabled?: boolean;
+  miniHudAlwaysOnTop?: boolean;
+  miniHudClickThrough?: boolean;
+  miniHudOpacityPercent?: number;
+  miniHudX?: number | null;
+  miniHudY?: number | null;
+  /** "minimal" | "compact" | "detailed" */
+  miniHudPreset?: string;
 }
 
 export interface SettingsEnvelope {
@@ -349,6 +431,8 @@ export interface RuntimeStatus {
   cleanerSession?: CleanerSessionStatus;
   automaticExecutionReady: boolean;
   actionCapability: ActionCapability;
+  shuttingDown?: boolean;
+  shutdownPhase?: ShutdownPhase;
 }
 
 export interface ActionMeasurement {

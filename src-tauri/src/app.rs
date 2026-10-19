@@ -7,6 +7,7 @@ use crate::performance::{
     CpuSensor, FpsCaptureStatus, GpuSensor, GpuTelemetry, PresentMonController,
 };
 use crate::powershift::{PowerShiftMode, PowerShiftOutcome};
+use crate::proof::{ProofReport, ProofSample, ProofSession};
 use crate::rewind::RewindEntry;
 use crate::settings::{AppSettings, SettingsEnvelope, SettingsStore};
 use crate::telemetry::{Collector, MemorySnapshot, PlatformCollector};
@@ -15,12 +16,12 @@ use std::collections::VecDeque;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock, TryLockError};
 use std::time::{Duration, Instant};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
-use tauri::{Emitter, Manager, State, WindowEvent};
+use tauri::{Emitter, Manager, RunEvent, State, WindowEvent};
 
 const TRAY_ID: &str = "memflux-tray";
 const EVENT_FRAME: &str = "telemetry://frame";
@@ -59,6 +60,8 @@ struct RuntimeStatus {
     cleaner_session: CleanerSessionStatus,
     automatic_execution_ready: bool,
     action_capability: ActionCapability,
+    shutting_down: bool,
+    shutdown_phase: ShutdownPhase,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -90,10 +93,46 @@ pub struct ActionRecord {
     reason: String,
 }
 
+/// Ordered shutdown lifecycle. Logged and exposed through runtime status so a
+/// stalled phase is diagnosable instead of a silent hang.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShutdownPhase {
+    Running,
+    ShutdownRequested,
+    DrainingActions,
+    StoppingCapture,
+    RestoringSystemState,
+    StoppingPrivilegedHelper,
+    FlushingPersistence,
+    ShutdownComplete,
+    ShutdownDegraded,
+}
+
 struct ControlState {
     settings: AppSettings,
     paused: bool,
     shutdown: bool,
+    shutdown_phase: ShutdownPhase,
+}
+
+/// Poll a mutex until it is acquired or the deadline expires. Poisoned locks
+/// are recovered (consistent with the rest of the codebase); contention is the
+/// only thing that can starve shutdown work.
+fn lock_with_timeout<'a, T>(mutex: &'a Mutex<T>, deadline: Duration) -> Option<MutexGuard<'a, T>> {
+    let started = Instant::now();
+    loop {
+        match mutex.try_lock() {
+            Ok(guard) => return Some(guard),
+            Err(TryLockError::Poisoned(poisoned)) => return Some(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) => {
+                if started.elapsed() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+    }
 }
 
 pub struct AppState {
@@ -112,6 +151,11 @@ pub struct AppState {
     cleaner_status: RwLock<CleanerStatusSummary>,
     coordinator: Mutex<OptimizationCoordinator>,
     presentmon: Mutex<PresentMonController>,
+    proof: Mutex<ProofSession>,
+    proof_active: AtomicBool,
+    shutdown_started: AtomicBool,
+    /// (last persisted position, last persist instant) for Mini HUD moves.
+    mini_hud_pending: Mutex<(Option<(i32, i32)>, Instant)>,
 }
 
 impl AppState {
@@ -139,6 +183,7 @@ impl AppState {
                 settings: envelope.settings,
                 paused: false,
                 shutdown: false,
+                shutdown_phase: ShutdownPhase::Running,
             }),
             wake: Condvar::new(),
             cleaner_wake: Condvar::new(),
@@ -154,19 +199,157 @@ impl AppState {
             cleaner_status: RwLock::new(CleanerStatusSummary::default()),
             coordinator: Mutex::new(coordinator),
             presentmon: Mutex::new(PresentMonController::new()),
+            proof: Mutex::new(ProofSession::new()),
+            proof_active: AtomicBool::new(false),
+            shutdown_started: AtomicBool::new(false),
+            mini_hud_pending: Mutex::new((None, Instant::now())),
         }
     }
 
-    fn request_shutdown(&self) {
+    fn is_shutting_down(&self) -> bool {
+        self.control
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .shutdown
+    }
+
+    fn set_shutdown_phase(&self, phase: ShutdownPhase) {
         if let Ok(mut control) = self.control.lock() {
+            control.shutdown_phase = phase;
+        }
+        log::info!("Shutdown phase: {phase:?}");
+    }
+
+    /// Ordered, single-flight shutdown sequence:
+    /// refuse new actions -> drain in-flight action -> stop capture ->
+    /// restore system state (GameFocus + Rewind journal) -> revoke the
+    /// privileged helper -> final persistence flush.
+    ///
+    /// Every step is bounded; a stuck subsystem degrades the shutdown instead
+    /// of hanging the process, and unresolved restoration obligations remain in
+    /// the journal for startup recovery on next launch.
+    fn execute_shutdown(&self, _app: &tauri::AppHandle) {
+        if self.shutdown_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let mut degraded_notes: Vec<String> = Vec::new();
+        {
+            let mut control = self
+                .control
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             control.shutdown = true;
-            self.wake.notify_all();
-            self.cleaner_wake.notify_all();
+            control.shutdown_phase = ShutdownPhase::ShutdownRequested;
         }
-        let _ = action::revoke_cleaner_session();
-        if let Ok(mut pm) = self.presentmon.lock() {
-            pm.stop_capture();
+        self.wake.notify_all();
+        self.cleaner_wake.notify_all();
+        log::info!("MemFlux shutdown requested; coordinated teardown starting.");
+
+        // 1) Wait briefly for an in-flight native action to finish so we do not
+        //    race its post-measurement or quota accounting.
+        self.set_shutdown_phase(ShutdownPhase::DrainingActions);
+        let drain_deadline = Instant::now() + Duration::from_secs(3);
+        let mut action_drained = false;
+        while Instant::now() < drain_deadline {
+            if self.action_lock.try_lock().is_ok() {
+                action_drained = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
+        if !action_drained {
+            let note = "A memory action was still running; shutdown continued and \
+                        startup recovery remains armed."
+                .to_string();
+            log::warn!("{note}");
+            degraded_notes.push(note);
+        }
+
+        // 2) Stop frame capture so the helper process and ETW session close.
+        self.set_shutdown_phase(ShutdownPhase::StoppingCapture);
+        match lock_with_timeout(&self.presentmon, Duration::from_millis(750)) {
+            Some(mut pm) => pm.stop_capture(),
+            None => {
+                let note = "PresentMon controller was busy during shutdown; capture stop skipped."
+                    .to_string();
+                log::warn!("{note}");
+                degraded_notes.push(note);
+            }
+        }
+
+        // 3) Restore system state: close GameFocus session, then reconcile all
+        //    journal restoration obligations against live Windows state.
+        self.set_shutdown_phase(ShutdownPhase::RestoringSystemState);
+        match lock_with_timeout(&self.coordinator, Duration::from_secs(3)) {
+            Some(mut coord) => {
+                let report = coord.shutdown_and_restore(crate::telemetry::timestamp_ms());
+                log::info!(
+                    "Shutdown restoration: {} restored, {} external preserved, {} unresolved, gamefocus_closed={}.",
+                    report.restored,
+                    report.external_preserved,
+                    report.still_unresolved.len(),
+                    report.gamefocus_session_closed
+                );
+                degraded_notes.extend(report.notes);
+            }
+            None => {
+                let note = "Coordinator was busy during shutdown; journal obligations \
+                            deferred to startup recovery."
+                    .to_string();
+                log::warn!("{note}");
+                degraded_notes.push(note);
+            }
+        }
+
+        // 4) Revoke the privileged cleaner session (internally bounded IPC).
+        self.set_shutdown_phase(ShutdownPhase::StoppingPrivilegedHelper);
+        let revoked = action::revoke_cleaner_session();
+        if revoked.authorized {
+            let note = "Cleaner session helper did not confirm revocation before its \
+                        timeout; its controller watchdog will end it on process exit."
+                .to_string();
+            log::warn!("{note}");
+            degraded_notes.push(note);
+        }
+
+        // 5) Final persistence flush: bounded action history + any pending
+        //    Mini HUD position not yet throttled to disk.
+        self.proof_active.store(false, Ordering::Relaxed);
+
+        self.set_shutdown_phase(ShutdownPhase::FlushingPersistence);
+        if let Ok(history) = self.action_history.lock()
+            && let Err(error) = persist_action_history(&self.action_history_path, &history)
+        {
+            log::warn!("Final action-history flush failed: {error}");
+        }
+        if let Ok(mut pending) = self.mini_hud_pending.lock()
+            && let Some((x, y)) = pending.0
+        {
+            let settings = {
+                let mut control = self
+                    .control
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                control.settings.mini_hud_x = Some(x);
+                control.settings.mini_hud_y = Some(y);
+                control.settings.clone()
+            };
+            if let Err(error) = self.settings_store.save(&settings) {
+                log::warn!("Final Mini HUD position flush failed: {error}");
+            }
+            pending.0 = None;
+        }
+
+        let phase = if degraded_notes.is_empty() {
+            ShutdownPhase::ShutdownComplete
+        } else {
+            for note in &degraded_notes {
+                log::warn!("Shutdown degraded: {note}");
+            }
+            ShutdownPhase::ShutdownDegraded
+        };
+        self.set_shutdown_phase(phase);
+        log::info!("MemFlux shutdown lifecycle finished ({phase:?}).");
     }
 
     fn toggle_paused(&self) -> bool {
@@ -213,9 +396,13 @@ fn get_settings(state: State<'_, Arc<AppState>>) -> SettingsEnvelope {
 
 #[tauri::command]
 fn update_settings(
+    app: tauri::AppHandle,
     settings: AppSettings,
     state: State<'_, Arc<AppState>>,
 ) -> Result<AppSettings, String> {
+    if state.is_shutting_down() {
+        return Err("MemFlux is shutting down; settings changes are refused.".into());
+    }
     let persisted = {
         let mut control = state
             .control
@@ -229,6 +416,7 @@ fn update_settings(
         .settings_warning
         .lock()
         .unwrap_or_else(|error| error.into_inner()) = None;
+    sync_mini_hud(&app, &persisted);
     state.wake.notify_all();
     state.cleaner_wake.notify_all();
     log::info!("Settings updated and persisted.");
@@ -261,12 +449,17 @@ fn set_monitoring_paused(
 
 #[tauri::command]
 fn get_runtime_status(state: State<'_, Arc<AppState>>) -> RuntimeStatus {
-    let (paused, cleaner_paused) = {
+    let (paused, cleaner_paused, shutting_down, shutdown_phase) = {
         let control = state
             .control
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        (control.paused, control.settings.cleaner_paused)
+        (
+            control.paused,
+            control.settings.cleaner_paused,
+            control.shutdown,
+            control.shutdown_phase,
+        )
     };
     let cleaner_session = action::cleaner_session_status();
     let action_capability = action::capability();
@@ -287,6 +480,8 @@ fn get_runtime_status(state: State<'_, Arc<AppState>>) -> RuntimeStatus {
         cleaner_session,
         automatic_execution_ready,
         action_capability,
+        shutting_down,
+        shutdown_phase,
     }
 }
 
@@ -306,6 +501,9 @@ async fn purge_standby_memory(
     app: tauri::AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<ActionRecord, String> {
+    if state.is_shutting_down() {
+        return Err("MemFlux is shutting down; new actions are refused.".into());
+    }
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || run_standby_purge(&app, &state, "manual"))
         .await
@@ -316,6 +514,9 @@ async fn purge_standby_memory(
 async fn authorize_cleaner_session(
     state: State<'_, Arc<AppState>>,
 ) -> Result<CleanerSessionStatus, String> {
+    if state.is_shutting_down() {
+        return Err("MemFlux is shutting down; session authorization is refused.".into());
+    }
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let status = action::authorize_cleaner_session();
@@ -351,6 +552,9 @@ fn apply_powershift_mode(
     allow_on_battery: Option<bool>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<PowerShiftOutcome, String> {
+    if state.is_shutting_down() {
+        return Err("MemFlux is shutting down; new changes are refused.".into());
+    }
     let battery_allowed = allow_on_battery.unwrap_or_else(|| {
         state
             .control
@@ -372,6 +576,11 @@ fn restore_rewind_entry(
     action_id: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<RewindEntry, String> {
+    if state.is_shutting_down() {
+        return Err(
+            "MemFlux is shutting down; restoration runs under the shutdown sequence.".into(),
+        );
+    }
     let now_ms = crate::telemetry::timestamp_ms();
     let mut coord = state
         .coordinator
@@ -382,6 +591,9 @@ fn restore_rewind_entry(
 
 #[tauri::command]
 fn restore_all_rewind(state: State<'_, Arc<AppState>>) -> Vec<RewindEntry> {
+    if state.is_shutting_down() {
+        return Vec::new();
+    }
     let now_ms = crate::telemetry::timestamp_ms();
     let mut coord = state
         .coordinator
@@ -397,6 +609,9 @@ fn activate_gamefocus_session(
     executable_path: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<GameFocusStatus, String> {
+    if state.is_shutting_down() {
+        return Err("MemFlux is shutting down; new sessions are refused.".into());
+    }
     let settings = state
         .control
         .lock()
@@ -451,6 +666,9 @@ fn start_fps_capture(
     executable_name: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<FpsCaptureStatus, String> {
+    if state.is_shutting_down() {
+        return Err("MemFlux is shutting down; capture cannot start.".into());
+    }
     let permitted = state
         .control
         .lock()
@@ -480,6 +698,80 @@ fn stop_fps_capture(state: State<'_, Arc<AppState>>) -> FpsCaptureStatus {
     pm.status(1_000, permitted)
 }
 
+// ── V4.2 Performance Proof ───────────────────────────────────────────────────
+
+#[tauri::command]
+fn begin_proof_session(state: State<'_, Arc<AppState>>) -> Result<ProofReport, String> {
+    if state.is_shutting_down() {
+        return Err("MemFlux is shutting down; measurement cannot start.".into());
+    }
+    let now_ms = crate::telemetry::timestamp_ms();
+    let report = {
+        let mut proof = state
+            .proof
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        proof.begin(now_ms);
+        proof.status()
+    };
+    state.proof_active.store(true, Ordering::Relaxed);
+    log::info!("Performance Proof baseline sampling started.");
+    Ok(report)
+}
+
+#[tauri::command]
+fn mark_proof_change(
+    state: State<'_, Arc<AppState>>,
+    label: Option<String>,
+) -> Result<ProofReport, String> {
+    if !state.proof_active.load(Ordering::Relaxed) {
+        return Err("No Performance Proof session is active.".into());
+    }
+    let report = {
+        let mut proof = state
+            .proof
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        proof.mark_change(crate::telemetry::timestamp_ms(), label);
+        proof.status()
+    };
+    log::info!("Performance Proof change boundary marked.");
+    Ok(report)
+}
+
+#[tauri::command]
+fn proof_session_status(state: State<'_, Arc<AppState>>) -> ProofReport {
+    if !state.proof_active.load(Ordering::Relaxed) {
+        return ProofReport {
+            active: false,
+            phase: None,
+            baseline_samples: 0,
+            post_samples: 0,
+            comparisons: Vec::new(),
+            verdict: "No session active.".into(),
+            caveat: String::new(),
+        };
+    }
+    state
+        .proof
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .status()
+}
+
+/// Final report, then the session stops collecting.
+#[tauri::command]
+fn end_proof_session(state: State<'_, Arc<AppState>>) -> ProofReport {
+    state.proof_active.store(false, Ordering::Relaxed);
+    let report = state
+        .proof
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .report();
+    log::info!("Performance Proof session ended: {}", report.verdict);
+    report
+}
+
 fn run_standby_purge(app: &tauri::AppHandle, state: &Arc<AppState>, origin: &str) -> ActionRecord {
     let timestamp = crate::telemetry::timestamp_ms();
     let started = Instant::now();
@@ -504,6 +796,31 @@ fn run_standby_purge(app: &tauri::AppHandle, state: &Arc<AppState>, origin: &str
                 duration_ms: 0,
                 native_duration_ms: 0,
                 reason: "Another memory action is already running.".into(),
+            },
+        );
+    };
+
+    if state.is_shutting_down() {
+        return record_action(
+            app,
+            state,
+            ActionRecord {
+                id: action_id(origin, timestamp),
+                timestamp_ms: timestamp,
+                origin: origin.into(),
+                operation: OPERATION_PURGE_STANDBY.into(),
+                outcome: "skipped_shutting_down".into(),
+                native_request_succeeded: false,
+                native_lifecycle: "not_started".into(),
+                elevation_used: false,
+                late_completion_possible: false,
+                nt_status_hex: None,
+                before: None,
+                after: None,
+                observed_reduction_bytes: None,
+                duration_ms: 0,
+                native_duration_ms: 0,
+                reason: "MemFlux is shutting down; the memory action was not started.".into(),
             },
         );
     };
@@ -733,7 +1050,18 @@ fn persist_action_history(path: &Path, records: &VecDeque<ActionRecord>) -> Resu
         .map_err(|error| format!("Could not replace action history: {error}"))
 }
 
+const MINI_HUD_LABEL: &str = "minihud";
+const MINI_HUD_WIDTH: f64 = 268.0;
+const MINI_HUD_HEIGHT: f64 = 148.0;
+
 fn show_dashboard(app: &tauri::AppHandle) {
+    if app.get_webview_window("main").is_none() {
+        // Ultra-Light mode destroyed the webview; recreate on demand.
+        if let Err(error) = recreate_main_window(app) {
+            log::warn!("{error}");
+            return;
+        }
+    }
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
@@ -747,6 +1075,96 @@ fn show_dashboard(app: &tauri::AppHandle) {
         {
             let _ = app.emit(EVENT_FRAME, frame);
         }
+    }
+}
+
+fn recreate_main_window(app: &tauri::AppHandle) -> Result<(), String> {
+    tauri::WebviewWindowBuilder::new(app, "main", tauri::WebviewUrl::App("index.html".into()))
+        .title("MemFlux — Standby Memory Cleaner & Performance Control")
+        .inner_size(1240.0, 800.0)
+        .min_inner_size(900.0, 620.0)
+        .center()
+        .resizable(true)
+        .visible(true)
+        .build()
+        .map_err(|error| format!("Could not recreate dashboard window: {error}"))?;
+    log::info!("Dashboard webview recreated (ultra-light restore).");
+    Ok(())
+}
+
+/// Create or refresh the independent Mini HUD webview against current
+/// settings. Shares the same frontend bundle; the `hud=mini` route renders a
+/// compact component instead of the dashboard.
+fn sync_mini_hud(app: &tauri::AppHandle, settings: &AppSettings) {
+    let existing = app.get_webview_window(MINI_HUD_LABEL);
+    if !settings.mini_hud_enabled {
+        if let Some(window) = existing {
+            let _ = window.destroy();
+            log::info!("Mini HUD window closed (disabled).");
+        }
+        return;
+    }
+    let window = match existing {
+        Some(window) => window,
+        None => {
+            let mut builder = tauri::WebviewWindowBuilder::new(
+                app,
+                MINI_HUD_LABEL,
+                tauri::WebviewUrl::App("index.html?hud=mini".into()),
+            )
+            .title("MemFlux Mini HUD")
+            .inner_size(MINI_HUD_WIDTH, MINI_HUD_HEIGHT)
+            .resizable(false)
+            .decorations(false)
+            .transparent(true)
+            .shadow(false)
+            .always_on_top(settings.mini_hud_always_on_top)
+            .skip_taskbar(true)
+            .visible(true);
+            if let (Some(x), Some(y)) = (settings.mini_hud_x, settings.mini_hud_y) {
+                builder = builder.position(x as f64, y as f64);
+            } else {
+                builder = builder.center();
+            }
+            match builder.build() {
+                Ok(window) => {
+                    log::info!("Mini HUD window created.");
+                    window
+                }
+                Err(error) => {
+                    log::warn!("Could not create Mini HUD window: {error}");
+                    return;
+                }
+            }
+        }
+    };
+    let _ = window.set_always_on_top(settings.mini_hud_always_on_top);
+    let _ = window.set_ignore_cursor_events(settings.mini_hud_click_through);
+}
+
+/// Persist the Mini HUD's last known position (throttled — window moves fire
+/// continuously while dragging).
+fn note_mini_hud_position(state: &AppState, x: i32, y: i32) {
+    let mut pending = state
+        .mini_hud_pending
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    pending.0 = Some((x, y));
+    if pending.1.elapsed() < Duration::from_millis(1_500) {
+        return;
+    }
+    pending.1 = Instant::now();
+    let settings = {
+        let mut control = state
+            .control
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        control.settings.mini_hud_x = Some(x);
+        control.settings.mini_hud_y = Some(y);
+        control.settings.clone()
+    };
+    if let Err(error) = state.settings_store.save(&settings) {
+        log::warn!("Could not persist Mini HUD position: {error}");
     }
 }
 
@@ -858,7 +1276,7 @@ fn spawn_cleaner_scheduler(app: tauri::AppHandle, state: Arc<AppState>) {
                     .write()
                     .unwrap_or_else(|error| error.into_inner()) = summary.clone();
 
-                if summary.decision == CleanerDecision::Trigger && !action_busy {
+                if summary.decision == CleanerDecision::Trigger && !action_busy && !shutdown {
                     let _ = run_standby_purge(&app, &state, "automatic");
                 }
 
@@ -905,7 +1323,13 @@ fn spawn_sampler(app: tauri::AppHandle, state: Arc<AppState>) {
                     .get_webview_window("main")
                     .and_then(|window| window.is_visible().ok())
                     .unwrap_or(false);
-                let interval_ms = if window_visible {
+                let mini_hud_visible = app
+                    .get_webview_window(MINI_HUD_LABEL)
+                    .and_then(|window| window.is_visible().ok())
+                    .unwrap_or(false);
+                // A UI surface (dashboard or mini HUD) is consuming frames.
+                let ui_active = window_visible || mini_hud_visible;
+                let interval_ms = if ui_active {
                     settings.foreground_interval_ms
                 } else {
                     settings.background_interval_ms
@@ -915,7 +1339,8 @@ fn spawn_sampler(app: tauri::AppHandle, state: Arc<AppState>) {
                     sequence = sequence.saturating_add(1);
                     let snapshot = collector.collect(sequence, interval_ms);
                     let decision = guardian.evaluate(&snapshot, settings.guardian_enabled);
-                    let hud_active = window_visible && settings.performance_hud_enabled;
+                    let hud_active = ui_active
+                        && (settings.performance_hud_enabled || settings.mini_hud_enabled);
                     let cpu_metric = cpu.collect(interval_ms, hud_active && settings.hud_show_cpu);
                     let gpu_telemetry = gpu.collect(
                         interval_ms,
@@ -942,32 +1367,7 @@ fn spawn_sampler(app: tauri::AppHandle, state: Arc<AppState>) {
                         coord.tick(
                             &settings,
                             fg_process,
-                            |pid| {
-                                #[cfg(target_os = "windows")]
-                                {
-                                    use windows::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
-                                    use windows::Win32::System::Threading::{
-                                        GetExitCodeProcess, OpenProcess,
-                                        PROCESS_QUERY_LIMITED_INFORMATION,
-                                    };
-                                    let Ok(h) = (unsafe {
-                                        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
-                                    }) else {
-                                        return false;
-                                    };
-                                    let mut code = 0_u32;
-                                    let alive =
-                                        unsafe { GetExitCodeProcess(h, &mut code) }.is_ok()
-                                            && code == STILL_ACTIVE.0 as u32;
-                                    let _ = unsafe { CloseHandle(h) };
-                                    alive
-                                }
-                                #[cfg(not(target_os = "windows"))]
-                                {
-                                    let _ = pid;
-                                    false
-                                }
-                            },
+                            crate::performance::is_process_alive,
                             &gpu_telemetry.per_process_gpu_percent,
                             snapshot.timestamp_ms,
                         );
@@ -1007,11 +1407,30 @@ fn spawn_sampler(app: tauri::AppHandle, state: Arc<AppState>) {
                             frame.snapshot.page_reads_per_second.value,
                         );
                     }
+                    if state.proof_active.load(Ordering::Relaxed)
+                        && let Ok(mut proof) = state.proof.lock()
+                    {
+                        proof.observe(ProofSample {
+                            at_ms: frame.snapshot.timestamp_ms,
+                            cpu_percent: frame.cpu_utilization.value,
+                            gpu_percent: frame.gpu_telemetry.utilization.value,
+                            ram_used_bytes: match (
+                                frame.snapshot.total_physical_bytes.value,
+                                frame.snapshot.available_physical_bytes.value,
+                            ) {
+                                (Some(total), Some(avail)) => Some((total - avail).max(0.0)),
+                                _ => None,
+                            },
+                            fps: frame.fps_capture.fps.value,
+                            frame_ms: frame.fps_capture.frame_time_ms.value,
+                            frame_p99_ms: frame.fps_capture.frame_time_p99_ms,
+                        });
+                    }
                     *state
                         .latest
                         .write()
                         .unwrap_or_else(|error| error.into_inner()) = Some(frame.clone());
-                    if window_visible && let Err(error) = app.emit(EVENT_FRAME, &frame) {
+                    if ui_active && let Err(error) = app.emit(EVENT_FRAME, &frame) {
                         log::warn!("Could not emit telemetry frame: {error}");
                     }
                     update_tray_tooltip(
@@ -1052,6 +1471,7 @@ fn pressure_label(pressure: &crate::guardian::PressureLevel) -> &'static str {
 
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open", "Open dashboard", true, None::<&str>)?;
+    let mini_hud = MenuItem::with_id(app, "toggle-minihud", "Toggle Mini HUD", true, None::<&str>)?;
     let toggle = MenuItem::with_id(
         app,
         "toggle-monitoring",
@@ -1061,7 +1481,7 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     )?;
     let separator = PredefinedMenuItem::separator(app)?;
     let exit = MenuItem::with_id(app, "exit", "Exit MemFlux", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &toggle, &separator, &exit])?;
+    let menu = Menu::with_items(app, &[&open, &mini_hud, &toggle, &separator, &exit])?;
     let state = app.state::<Arc<AppState>>().inner().clone();
 
     let mut builder = TrayIconBuilder::with_id(TRAY_ID)
@@ -1070,13 +1490,27 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         .show_menu_on_left_click(true)
         .on_menu_event(move |app, event| match event.id().as_ref() {
             "open" => show_dashboard(app),
+            "toggle-minihud" => {
+                let settings = {
+                    let mut control = state
+                        .control
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    control.settings.mini_hud_enabled = !control.settings.mini_hud_enabled;
+                    control.settings.clone()
+                };
+                if let Err(error) = state.settings_store.save(&settings) {
+                    log::warn!("Could not persist Mini HUD toggle: {error}");
+                }
+                sync_mini_hud(app, &settings);
+            }
             "toggle-monitoring" => {
                 let paused = state.toggle_paused();
                 let _ = app.emit(EVENT_MONITORING, !paused);
                 update_tray_tooltip(app, paused, None);
             }
             "exit" => {
-                state.request_shutdown();
+                state.execute_shutdown(app);
                 app.exit(0);
             }
             _ => {}
@@ -1115,7 +1549,11 @@ pub fn run() {
             activate_gamefocus_session,
             deactivate_gamefocus_session,
             start_fps_capture,
-            stop_fps_capture
+            stop_fps_capture,
+            begin_proof_session,
+            mark_proof_change,
+            proof_session_status,
+            end_proof_session
         ])
         .setup(|app| {
             let config_dir = app.path().app_config_dir()?;
@@ -1137,33 +1575,88 @@ pub fn run() {
             ));
             app.manage(state.clone());
             build_tray(app)?;
-            spawn_cleaner_scheduler(app.handle().clone(), state.clone());
-            spawn_sampler(app.handle().clone(), state);
-            log::info!("MemFlux V4.1 runtime started.");
-            Ok(())
-        })
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                let state = window.state::<Arc<AppState>>();
-                let close_to_tray = state
+            {
+                let settings = state
                     .control
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
                     .settings
-                    .close_to_tray;
-                if close_to_tray {
-                    api.prevent_close();
-                    let _ = window.hide();
-                } else {
-                    state.request_shutdown();
-                    window.app_handle().exit(0);
+                    .clone();
+                sync_mini_hud(app.handle(), &settings);
+            }
+            spawn_cleaner_scheduler(app.handle().clone(), state.clone());
+            spawn_sampler(app.handle().clone(), state);
+            log::info!("MemFlux V4.2 runtime started.");
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            match event {
+                WindowEvent::CloseRequested { api, .. } => match window.label() {
+                    "main" => {
+                        let state = window.state::<Arc<AppState>>();
+                        let (close_to_tray, ultra_light) = {
+                            let control = state
+                                .control
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner());
+                            (
+                                control.settings.close_to_tray,
+                                control.settings.ultra_light_tray_mode,
+                            )
+                        };
+                        if close_to_tray {
+                            api.prevent_close();
+                            if ultra_light {
+                                // Ultra-Light Tray Mode: free the entire
+                                // WebView2 subtree; the tray remains functional
+                                // and "Open dashboard" recreates the window.
+                                let _ = window.destroy();
+                                log::info!("Dashboard webview destroyed (ultra-light tray mode).");
+                            } else {
+                                let _ = window.hide();
+                            }
+                        } else {
+                            state.execute_shutdown(window.app_handle());
+                            window.app_handle().exit(0);
+                        }
+                    }
+                    MINI_HUD_LABEL => {
+                        // Dismissing the HUD persists its disabled state.
+                        let state = window.state::<Arc<AppState>>();
+                        let settings = {
+                            let mut control = state
+                                .control
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner());
+                            control.settings.mini_hud_enabled = false;
+                            control.settings.clone()
+                        };
+                        if let Err(error) = state.settings_store.save(&settings) {
+                            log::warn!("Could not persist Mini HUD disabled state: {error}");
+                        }
+                    }
+                    _ => {}
+                },
+                WindowEvent::Moved(position) if window.label() == MINI_HUD_LABEL => {
+                    let state = window.state::<Arc<AppState>>();
+                    note_mini_hud_position(&state, position.x, position.y);
                 }
+                _ => {}
             }
         });
 
-    builder
-        .run(tauri::generate_context!())
-        .expect("error while running MemFlux");
+    let app = builder
+        .build(tauri::generate_context!())
+        .expect("error while building MemFlux");
+    // Catch-all: any exit path that skipped the coordinated teardown (process
+    // exit codes, last-window-close edge cases) still runs restoration once.
+    app.run(|app_handle, event| {
+        if matches!(event, RunEvent::Exit)
+            && let Some(state) = app_handle.try_state::<Arc<AppState>>()
+        {
+            state.execute_shutdown(app_handle);
+        }
+    });
 }
 
 #[cfg(test)]

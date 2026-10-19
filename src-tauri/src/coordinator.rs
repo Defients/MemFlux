@@ -38,12 +38,31 @@ pub struct CoordinatorSnapshot {
     pub events: Vec<CoordinatorEvent>,
 }
 
+/// Outcome of the coordinated shutdown pass: session teardown plus journal
+/// restoration obligations processed while the process can still act.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ShutdownReport {
+    pub gamefocus_session_closed: bool,
+    pub restored: usize,
+    pub external_preserved: usize,
+    pub still_unresolved: Vec<String>,
+    pub notes: Vec<String>,
+}
+
+impl ShutdownReport {
+    pub fn degraded(&self) -> bool {
+        !self.still_unresolved.is_empty()
+    }
+}
+
 pub struct OptimizationCoordinator {
     rewind: RewindJournal,
     workload_analyzer: WorkloadAnalyzer,
     gamefocus: GameFocusStatus,
     events: VecDeque<CoordinatorEvent>,
     manual_hold_idle_for_pid: Option<u32>,
+    shutting_down: bool,
 }
 
 impl OptimizationCoordinator {
@@ -82,6 +101,7 @@ impl OptimizationCoordinator {
             gamefocus: GameFocusStatus::default(),
             events,
             manual_hold_idle_for_pid: None,
+            shutting_down: false,
         }
     }
 
@@ -144,6 +164,9 @@ impl OptimizationCoordinator {
         allow_on_battery: bool,
         now_ms: u64,
     ) -> Result<PowerShiftOutcome, String> {
+        if self.shutting_down {
+            return Err("MemFlux is shutting down; new changes are not accepted.".into());
+        }
         let outcome = powershift::apply_power_mode(
             mode,
             custom_guid,
@@ -191,10 +214,10 @@ impl OptimizationCoordinator {
         });
         self.gamefocus.restoration_state = match entry.status {
             RewindStatus::Restored => format!("Restored to {}", entry.previous_state_label),
-            RewindStatus::ConflictSkipped => {
+            RewindStatus::ExternalChangePreserved => {
                 "External user change preserved (restore skipped)".into()
             }
-            _ => format!("Restore status: {:?}", entry.status),
+            other => format!("Restore status: {}", other.label()),
         };
         self.log_event(
             now_ms,
@@ -241,6 +264,9 @@ impl OptimizationCoordinator {
         allow_on_battery: bool,
         now_ms: u64,
     ) -> Result<GameFocusStatus, String> {
+        if self.shutting_down {
+            return Err("MemFlux is shutting down; new sessions are not accepted.".into());
+        }
         let seq = EVENT_SEQ.fetch_add(1, Ordering::Relaxed);
         let session_id = format!("gf-session-{now_ms}-{seq}");
         let exe_name = executable_path
@@ -355,12 +381,12 @@ impl OptimizationCoordinator {
                             "Restored Windows power scheme to '{}' ({}).",
                             entry.previous_state_label, entry.previous_state
                         ),
-                        RewindStatus::ConflictSkipped => entry
+                        RewindStatus::ExternalChangePreserved => entry
                             .error_detail
                             .unwrap_or_else(|| "Preserved external power scheme selection.".into()),
-                        _ => entry
-                            .error_detail
-                            .unwrap_or_else(|| "Power scheme restoration failed.".into()),
+                        other => entry.error_detail.unwrap_or_else(|| {
+                            format!("Power scheme restoration status: {}", other.label())
+                        }),
                     };
                 }
                 Ok(None) => {}
@@ -398,6 +424,89 @@ impl OptimizationCoordinator {
         self.snapshot().gamefocus
     }
 
+    /// Coordinated shutdown: end any live GameFocus session, then reconcile
+    /// every remaining journal restoration obligation against live state.
+    /// Idempotent and bounded — never blocks on a single entry's outcome.
+    pub fn shutdown_and_restore(&mut self, now_ms: u64) -> ShutdownReport {
+        self.shutting_down = true;
+        let mut report = ShutdownReport::default();
+
+        if matches!(
+            self.gamefocus.lifecycle,
+            GameSessionLifecycle::Active | GameSessionLifecycle::TemporarilyBackgrounded
+        ) {
+            self.deactivate_gamefocus_and_restore(
+                "MemFlux is shutting down; session-owned changes restored first.",
+                now_ms,
+            );
+            report.gamefocus_session_closed = true;
+        }
+
+        let results = self.rewind.restore_all_eligible(
+            now_ms,
+            |_| powershift::read_live_scheme_guid(),
+            |_, guid| powershift::apply_live_scheme_guid(guid),
+        );
+        for entry in results {
+            match entry.status {
+                RewindStatus::Restored => report.restored += 1,
+                RewindStatus::ExternalChangePreserved => report.external_preserved += 1,
+                other if other.is_unresolved() => {
+                    report.still_unresolved.push(format!(
+                        "{} ({})",
+                        entry.target_identity,
+                        other.label()
+                    ));
+                }
+                _ => {}
+            }
+            let detail = entry.error_detail.clone().unwrap_or_else(|| {
+                format!(
+                    "Shutdown restored '{}' ({}).",
+                    entry.previous_state_label, entry.previous_state
+                )
+            });
+            self.log_event(
+                now_ms,
+                "rewind",
+                "shutdown_restore",
+                format!(
+                    "Shutdown restore {} -> {}",
+                    entry.target_identity,
+                    entry.status.label()
+                ),
+                detail,
+            );
+        }
+
+        if report.degraded() {
+            let note = format!(
+                "Shutdown completed with {} unresolved restoration obligation(s); startup recovery will reconcile on next launch.",
+                report.still_unresolved.len()
+            );
+            self.log_event(
+                now_ms,
+                "rewind",
+                "shutdown_degraded",
+                note.clone(),
+                note.clone(),
+            );
+            report.notes.push(note);
+        } else {
+            self.log_event(
+                now_ms,
+                "rewind",
+                "shutdown_restore_complete",
+                format!(
+                    "Shutdown restoration complete ({} restored, {} external preserved).",
+                    report.restored, report.external_preserved
+                ),
+                "All known reversible obligations resolved before exit.".into(),
+            );
+        }
+        report
+    }
+
     pub fn tick(
         &mut self,
         settings: &AppSettings,
@@ -406,6 +515,9 @@ impl OptimizationCoordinator {
         per_process_gpu: &HashMap<u32, f64>,
         now_ms: u64,
     ) {
+        if self.shutting_down {
+            return;
+        }
         self.gamefocus.enabled = settings.gamefocus_enabled;
         if !settings.gamefocus_enabled {
             if matches!(

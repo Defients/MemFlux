@@ -4,7 +4,10 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+
+static SESSION_TAG: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy)]
 struct CpuTimes {
@@ -71,6 +74,9 @@ pub struct FpsCaptureStatus {
     pub fps: Metric,
     pub frame_time_ms: Metric,
     pub frame_time_p99_ms: Option<f64>,
+    /// Stutter Detective: recent frame-time anomalies observed during capture.
+    pub recent_stutters: Vec<crate::stutter::StutterEvent>,
+    pub stutter_summary: Option<crate::stutter::StutterSummary>,
     pub status_detail: String,
 }
 
@@ -272,15 +278,210 @@ impl GpuSensor {
     }
 }
 
+/// One presented frame attributed to the capture target, from real PresentMon
+/// CSV output only.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PresentedFrame {
+    pub ms_between_presents: f64,
+    pub dropped: bool,
+    pub received_ms: u64,
+    pub until_displayed_ms: Option<f64>,
+}
+
+/// Provider capabilities detected by running `PresentMon --help` once. Flags
+/// differ across upstream versions (1.x predates `--no_top`,
+/// `--terminate_on_proc_exit`, and `--session_name`), so the command line is
+/// built from what the installed binary actually advertises.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PresentMonCapabilities {
+    pub supports_process_id: bool,
+    pub supports_process_name: bool,
+    pub supports_session_name: bool,
+    pub supports_no_top: bool,
+    pub supports_no_console_stats: bool,
+    pub supports_terminate_on_proc_exit: bool,
+    pub banner: Option<String>,
+}
+
+const PRESENTMON_FRAME_RING_LIMIT: usize = 4096;
+const PRESENTMON_PROBE_BUDGET_MS: u64 = 3_000;
+const PRESENTMON_GRACEFUL_STOP_MS: u64 = 2_500;
+
 struct PresentMonRollingWindow {
-    frame_times_ms: Vec<f64>,
+    frames: std::collections::VecDeque<PresentedFrame>,
     last_sample_timestamp_ms: u64,
+    /// CSV header column lookup; populated from the provider's own header line.
+    columns: Option<std::collections::HashMap<String, usize>>,
+    /// Stutter Detective online detector over the same verified frames.
+    detector: crate::stutter::StutterDetector,
+}
+
+impl PresentMonRollingWindow {
+    fn new() -> Self {
+        Self {
+            frames: std::collections::VecDeque::new(),
+            last_sample_timestamp_ms: 0,
+            columns: None,
+            detector: crate::stutter::StutterDetector::new(),
+        }
+    }
+}
+
+/// Quote-aware CSV record parser (RFC 4180 quoting; PresentMon process names
+/// may contain commas). Returns trimmed field strings.
+fn parse_csv_record(line: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' if in_quotes && chars.peek() == Some(&'"') => {
+                current.push('"');
+                chars.next();
+            }
+            '"' => in_quotes = !in_quotes,
+            ',' if !in_quotes => fields.push(std::mem::take(&mut current)),
+            _ => current.push(c),
+        }
+    }
+    fields.push(current);
+    fields
+}
+
+fn csv_field<'a>(
+    columns: &std::collections::HashMap<String, usize>,
+    fields: &'a [String],
+    name: &str,
+) -> Option<&'a str> {
+    let idx = columns.get(name)?;
+    fields.get(*idx).map(|s| s.trim())
+}
+
+/// Parse one CSV data line against the captured header. Returns None for
+/// malformed rows, rows belonging to a different PID, or rows with no real
+/// swapchain (PresentMon reports SwapChainAddress 0 for discarded events).
+fn parse_presentmon_frame(
+    line: &str,
+    columns: &std::collections::HashMap<String, usize>,
+    target_pid: u32,
+    now_ms: u64,
+) -> Option<PresentedFrame> {
+    if line.trim().is_empty() {
+        return None;
+    }
+    let fields = parse_csv_record(line);
+    // Per-process attribution is mandatory: without a ProcessID column we
+    // cannot prove the frame belongs to the capture target.
+    let pid_str = csv_field(columns, &fields, "processid")?;
+    let row_pid: u32 = pid_str.trim().parse().ok()?;
+    if row_pid != target_pid {
+        return None;
+    }
+    if let Some(swapchain) = csv_field(columns, &fields, "swapchainaddress")
+        && swapchain
+            .trim_start_matches("0x")
+            .trim_start_matches('0')
+            .is_empty()
+    {
+        return None;
+    }
+    let ms: f64 = csv_field(columns, &fields, "msbetweenpresents")?
+        .parse()
+        .ok()?;
+    if !ms.is_finite() || !(0.05..=10_000.0).contains(&ms) {
+        return None;
+    }
+    let dropped = csv_field(columns, &fields, "dropped")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let until_displayed_ms = csv_field(columns, &fields, "msuntildisplayed")
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite() && *v >= 0.0);
+    Some(PresentedFrame {
+        ms_between_presents: ms,
+        dropped,
+        received_ms: now_ms,
+        until_displayed_ms,
+    })
+}
+
+/// Probe `PresentMon --help` (bounded) and detect which flags the installed
+/// binary supports. PresentMon 1.x predates `--session_name`,
+/// `--terminate_on_proc_exit`, and `--no_top`.
+fn probe_presentmon(binary: &std::path::Path) -> Result<PresentMonCapabilities, String> {
+    let mut command = Command::new(binary);
+    command
+        .arg("--help")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(platform::CAPTURE_CREATION_FLAGS);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("Could not run PresentMon probe: {e}"))?;
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(PRESENTMON_PROBE_BUDGET_MS);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("PresentMon did not respond to --help within 3s.".into());
+            }
+            Err(e) => return Err(format!("PresentMon probe wait failed: {e}")),
+        }
+    }
+    let mut text = String::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        if stdout.read_to_end(&mut buf).is_ok() {
+            text.push_str(&String::from_utf8_lossy(&buf));
+        }
+    }
+    if let Some(mut stderr) = child.stderr.take() {
+        use std::io::Read;
+        let mut buf = Vec::new();
+        if stderr.read_to_end(&mut buf).is_ok() {
+            text.push_str(&String::from_utf8_lossy(&buf));
+        }
+    }
+    let lower = text.to_ascii_lowercase();
+    let has_flag =
+        |name: &str| lower.contains(&format!("--{name}")) || lower.contains(&format!("-{name}"));
+    let banner = text
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && line.to_ascii_lowercase().contains("presentmon"))
+        .map(|line| line.chars().take(120).collect());
+    Ok(PresentMonCapabilities {
+        supports_process_id: has_flag("process_id"),
+        supports_process_name: has_flag("process_name"),
+        supports_session_name: has_flag("session_name"),
+        supports_no_top: has_flag("no_top"),
+        supports_no_console_stats: has_flag("no_console_stats"),
+        supports_terminate_on_proc_exit: has_flag("terminate_on_proc_exit"),
+        banner,
+    })
 }
 
 pub struct PresentMonController {
     binary_path: Option<PathBuf>,
+    capabilities: Option<PresentMonCapabilities>,
+    probe_error: Option<String>,
     target_pid: Option<u32>,
+    /// Process creation stamp used to detect PID reuse between polls.
+    target_identity: Option<u64>,
     target_executable: Option<String>,
+    session_name: Option<String>,
     child: Option<Child>,
     rolling: Arc<Mutex<PresentMonRollingWindow>>,
 }
@@ -293,16 +494,46 @@ impl Default for PresentMonController {
 
 impl PresentMonController {
     pub fn new() -> Self {
+        let binary_path = detect_presentmon_binary();
+        let (capabilities, probe_error) = match &binary_path {
+            Some(path) => match probe_presentmon(path) {
+                Ok(caps) => (Some(caps), None),
+                Err(error) => {
+                    log::warn!("PresentMon capability probe failed: {error}");
+                    (None, Some(error))
+                }
+            },
+            None => (None, None),
+        };
         Self {
-            binary_path: detect_presentmon_binary(),
+            binary_path,
+            capabilities,
+            probe_error,
             target_pid: None,
+            target_identity: None,
             target_executable: None,
+            session_name: None,
             child: None,
-            rolling: Arc::new(Mutex::new(PresentMonRollingWindow {
-                frame_times_ms: Vec::new(),
-                last_sample_timestamp_ms: 0,
-            })),
+            rolling: Arc::new(Mutex::new(PresentMonRollingWindow::new())),
         }
+    }
+
+    /// Recent frame samples (for Stutter Detective correlation). Bounded copy
+    /// of the newest `limit` frames.
+    #[cfg(test)]
+    pub fn recent_frames(&self, limit: usize) -> Vec<PresentedFrame> {
+        let guard = self
+            .rolling
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        guard
+            .frames
+            .iter()
+            .rev()
+            .take(limit)
+            .rev()
+            .cloned()
+            .collect()
     }
 
     pub fn start_capture(
@@ -321,20 +552,67 @@ impl PresentMonController {
                     .into(),
             );
         };
-        if !platform::is_process_alive(pid) {
-            return Err(format!("Target process PID {pid} is not running."));
+        if let Some(probe_error) = &self.probe_error {
+            return Err(format!(
+                "PresentMon at {} did not pass the capability probe: {probe_error}",
+                binary.display()
+            ));
+        }
+        let capabilities = self
+            .capabilities
+            .clone()
+            .ok_or_else(|| "PresentMon capabilities have not been probed.".to_string())?;
+        let Some(identity) = platform::process_creation_stamp(pid) else {
+            return Err(format!(
+                "Target process PID {pid} is not running or not accessible."
+            ));
+        };
+
+        let mut args: Vec<String> = Vec::new();
+        if capabilities.supports_process_id {
+            args.push("--process_id".into());
+            args.push(pid.to_string());
+        } else if capabilities.supports_process_name {
+            args.push("--process_name".into());
+            args.push(executable_name.clone());
+        } else {
+            return Err(
+                "Installed PresentMon cannot filter by process; per-frame attribution is required for honest metrics."
+                    .into(),
+            );
+        }
+        args.push("--output_stdout".into());
+        if capabilities.supports_no_top {
+            args.push("--no_top".into());
+        } else if capabilities.supports_no_console_stats {
+            args.push("--no_console_stats".into());
+        }
+        // Unique session name; never terminate another session's trace.
+        let session_name = if capabilities.supports_session_name {
+            let suffix = SESSION_TAG.fetch_add(1, Ordering::Relaxed);
+            let name = format!("MemFluxMF{}_{pid}", suffix);
+            args.push("--session_name".into());
+            args.push(name.clone());
+            Some(name)
+        } else {
+            None
+        };
+        if capabilities.supports_terminate_on_proc_exit {
+            args.push("--terminate_on_proc_exit".into());
         }
 
-        let mut child = Command::new(&binary)
-            .args([
-                "--process_id",
-                &pid.to_string(),
-                "--output_stdout",
-                "--no_top",
-                "--stop_existing_session",
-            ])
+        let mut command = Command::new(&binary);
+        command
+            .args(&args)
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped());
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            // Its own process group so CTRL_BREAK reaches only PresentMon.
+            command.creation_flags(platform::CAPTURE_CREATION_FLAGS);
+        }
+        let mut child = command
             .spawn()
             .map_err(|e| format!("Failed to start PresentMon capture: {e}"))?;
 
@@ -342,59 +620,101 @@ impl PresentMonController {
             .stdout
             .take()
             .ok_or_else(|| "PresentMon stdout pipe unavailable.".to_string())?;
-        let rolling = self.rolling.clone();
-        if let Ok(mut guard) = rolling.lock() {
-            guard.frame_times_ms.clear();
-            guard.last_sample_timestamp_ms = 0;
+        if let Ok(mut guard) = self.rolling.lock() {
+            *guard = PresentMonRollingWindow::new();
         }
+        let rolling = self.rolling.clone();
 
         std::thread::Builder::new()
             .name("memflux-presentmon-reader".into())
             .spawn(move || {
                 let reader = BufReader::new(stdout);
-                let mut ms_between_presents_idx: Option<usize> = None;
                 for line in reader.lines().map_while(Result::ok) {
-                    if ms_between_presents_idx.is_none() {
-                        let cols: Vec<&str> = line.split(',').collect();
-                        ms_between_presents_idx = cols.iter().position(|c| {
-                            c.eq_ignore_ascii_case("MsBetweenPresents")
-                                || c.eq_ignore_ascii_case("msBetweenPresents")
-                        });
+                    let Ok(mut guard) = rolling.lock() else {
+                        break;
+                    };
+                    if guard.columns.is_none() {
+                        let fields = parse_csv_record(&line);
+                        if fields
+                            .iter()
+                            .any(|c| c.trim().eq_ignore_ascii_case("MsBetweenPresents"))
+                        {
+                            guard.columns = Some(
+                                fields
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, c)| (c.trim().to_ascii_lowercase(), i))
+                                    .collect(),
+                            );
+                        }
                         continue;
                     }
-                    if let Some(idx) = ms_between_presents_idx
-                        && let Some(val_str) = line.split(',').nth(idx)
-                        && let Ok(ms) = val_str.trim().parse::<f64>()
-                        && ms.is_finite()
-                        && (0.1..=1000.0).contains(&ms)
-                        && let Ok(mut guard) = rolling.lock()
-                    {
-                        if guard.frame_times_ms.len() >= 240 {
-                            guard.frame_times_ms.remove(0);
+                    let Some(columns) = guard.columns.clone() else {
+                        continue;
+                    };
+                    let now = timestamp_ms();
+                    if let Some(frame) = parse_presentmon_frame(&line, &columns, pid, now) {
+                        // Stutter Detective evaluates every verified frame.
+                        let _ = guard.detector.observe(&frame, now);
+                        if guard.frames.len() >= PRESENTMON_FRAME_RING_LIMIT {
+                            guard.frames.pop_front();
                         }
-                        guard.frame_times_ms.push(ms);
-                        guard.last_sample_timestamp_ms = timestamp_ms();
+                        guard.frames.push_back(frame);
+                        guard.last_sample_timestamp_ms = frame.received_ms;
                     }
                 }
             })
             .map_err(|e| format!("Failed to spawn PresentMon reader thread: {e}"))?;
 
         self.target_pid = Some(pid);
+        self.target_identity = Some(identity);
         self.target_executable = Some(executable_name);
+        self.session_name = session_name;
         self.child = Some(child);
         Ok(self.status(1_000, permitted))
     }
 
     pub fn stop_capture(&mut self) {
         if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
+            #[cfg(target_os = "windows")]
+            {
+                // Graceful stop first so PresentMon cleanly closes its ETW
+                // session instead of orphaning it on the system.
+                let pid = child.id();
+                if platform::signal_console_break(pid) {
+                    let deadline = std::time::Instant::now()
+                        + std::time::Duration::from_millis(PRESENTMON_GRACEFUL_STOP_MS);
+                    let mut exited = false;
+                    while std::time::Instant::now() < deadline {
+                        match child.try_wait() {
+                            Ok(Some(_)) => {
+                                exited = true;
+                                break;
+                            }
+                            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                            Err(_) => break,
+                        }
+                    }
+                    if !exited {
+                        log::warn!("PresentMon did not exit on console break; killing.");
+                        let _ = child.kill();
+                    }
+                } else {
+                    let _ = child.kill();
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = child.kill();
+            }
             let _ = child.wait();
         }
         self.target_pid = None;
+        self.target_identity = None;
         self.target_executable = None;
+        self.session_name = None;
         if let Ok(mut guard) = self.rolling.lock() {
-            guard.frame_times_ms.clear();
-            guard.last_sample_timestamp_ms = 0;
+            *guard = PresentMonRollingWindow::new();
         }
     }
 
@@ -409,25 +729,39 @@ impl PresentMonController {
                 "FPS capture is disabled by user preference.",
             );
         }
-        let Some(_binary) = &self.binary_path else {
+        if self.binary_path.is_none() {
             return unavailable_capture(
                 now,
                 interval,
                 false,
                 "PresentMon capture binary is not installed on this system.",
             );
-        };
-
-        if let Some(pid) = self.target_pid
-            && !platform::is_process_alive(pid)
-        {
-            self.stop_capture();
+        }
+        if let Some(probe_error) = self.probe_error.clone() {
             return unavailable_capture(
                 now,
                 interval,
-                true,
-                "Captured game process exited; capture session stopped cleanly.",
+                false,
+                &format!("PresentMon failed its capability probe: {probe_error}"),
             );
+        }
+
+        // PID-reuse guard: verify the process at target_pid is the same one we
+        // opened, not a new process that recycled the identifier.
+        if let Some(pid) = self.target_pid {
+            let same_process = self
+                .target_identity
+                .and_then(|expected| platform::process_creation_stamp(pid).map(|s| s == expected))
+                .unwrap_or(false);
+            if !same_process {
+                self.stop_capture();
+                return unavailable_capture(
+                    now,
+                    interval,
+                    true,
+                    "Captured game process exited or its PID was reused; capture session stopped cleanly.",
+                );
+            }
         }
 
         if let Some(child) = &mut self.child
@@ -451,15 +785,21 @@ impl PresentMonController {
             );
         };
 
-        let (samples, last_ts) = {
+        let (frames, last_ts, stutters, stutter_summary) = {
             let guard = self
                 .rolling
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            (guard.frame_times_ms.clone(), guard.last_sample_timestamp_ms)
+            (
+                guard.frames.iter().cloned().collect::<Vec<_>>(),
+                guard.last_sample_timestamp_ms,
+                guard.detector.recent_events(24),
+                guard.detector.summary(now),
+            )
         };
+        let provider_label = self.provider_label();
 
-        if samples.is_empty() || now.saturating_sub(last_ts) > 3_500 {
+        if frames.is_empty() || now.saturating_sub(last_ts) > 3_500 {
             let status = if last_ts == 0 {
                 MetricStatus::WarmingUp
             } else {
@@ -473,7 +813,7 @@ impl PresentMonController {
             return FpsCaptureStatus {
                 active: true,
                 provider_available: true,
-                provider_name: "Intel PresentMon ETW (non-injecting)".into(),
+                provider_name: provider_label.clone(),
                 target_pid: Some(pid),
                 target_executable: self.target_executable.clone(),
                 fps: Metric::missing(
@@ -495,21 +835,30 @@ impl PresentMonController {
                     detail,
                 ),
                 frame_time_p99_ms: None,
+                recent_stutters: stutters,
+                stutter_summary: Some(stutter_summary),
                 status_detail: detail.into(),
             };
         }
 
-        let mean_ms = samples.iter().sum::<f64>() / samples.len() as f64;
+        let display: Vec<f64> = frames
+            .iter()
+            .rev()
+            .take(240)
+            .map(|f| f.ms_between_presents)
+            .collect();
+        let mean_ms = display.iter().sum::<f64>() / display.len() as f64;
         let fps_val = if mean_ms > 0.0 { 1000.0 / mean_ms } else { 0.0 };
-        let mut sorted = samples;
+        let mut sorted = display;
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let p99_idx = ((sorted.len() as f64 * 0.99).floor() as usize).min(sorted.len() - 1);
         let p99_ms = sorted[p99_idx];
+        let dropped_count = frames.iter().rev().take(240).filter(|f| f.dropped).count();
 
         FpsCaptureStatus {
             active: true,
             provider_available: true,
-            provider_name: "Intel PresentMon ETW (non-injecting)".into(),
+            provider_name: provider_label,
             target_pid: Some(pid),
             target_executable: self.target_executable.clone(),
             fps: Metric::available(
@@ -529,7 +878,23 @@ impl PresentMonController {
                 interval,
             ),
             frame_time_p99_ms: Some(p99_ms),
-            status_detail: format!("Capturing PID {pid} ({:.1} ms P99)", p99_ms),
+            recent_stutters: stutters,
+            stutter_summary: Some(stutter_summary),
+            status_detail: format!(
+                "Capturing PID {pid} ({:.1} ms P99, {dropped_count} dropped in last 240 frames)",
+                p99_ms
+            ),
+        }
+    }
+
+    fn provider_label(&self) -> String {
+        match self
+            .capabilities
+            .as_ref()
+            .and_then(|caps| caps.banner.as_deref())
+        {
+            Some(banner) => format!("Intel PresentMon ETW (non-injecting) — {banner}"),
+            None => "Intel PresentMon ETW (non-injecting)".into(),
         }
     }
 }
@@ -571,6 +936,8 @@ fn unavailable_capture(
             detail,
         ),
         frame_time_p99_ms: None,
+        recent_stutters: Vec::new(),
+        stutter_summary: None,
         status_detail: detail.into(),
     }
 }
@@ -582,14 +949,37 @@ fn detect_presentmon_binary() -> Option<PathBuf> {
             return Some(path);
         }
     }
-    let candidates = [
-        r"C:\Program Files\Intel\PresentMon\PresentMon.exe",
-        r"C:\Program Files\Intel\PresentMon\PresentMon-2.0.0-x64.exe",
-    ];
-    for candidate in candidates {
-        let p = PathBuf::from(candidate);
-        if p.is_file() {
-            return Some(p);
+    // Scan the conventional install directory for any PresentMon*.exe, sorted
+    // so a plain "PresentMon.exe" wins over versioned names for determinism.
+    for root in [
+        r"C:\Program Files\Intel\PresentMon",
+        r"C:\Program Files (x86)\Intel\PresentMon",
+    ] {
+        let dir = PathBuf::from(root);
+        if !dir.is_dir() {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            let mut matches: Vec<PathBuf> = entries
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| {
+                    p.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe"))
+                        && p.file_name()
+                            .and_then(|n| n.to_str())
+                            .is_some_and(|n| n.to_ascii_lowercase().starts_with("presentmon"))
+                })
+                .collect();
+            matches.sort();
+            if let Some(preferred) = matches
+                .iter()
+                .find(|p| p.file_name().is_some_and(|n| n == "PresentMon.exe"))
+                .cloned()
+            {
+                return Some(preferred);
+            }
+            if let Some(first) = matches.into_iter().next() {
+                return Some(first);
+            }
         }
     }
     if let Ok(path_var) = std::env::var("PATH") {
@@ -611,6 +1001,10 @@ pub fn foreground_window_process() -> Option<(u32, String)> {
     platform::foreground_window_process()
 }
 
+pub fn is_process_alive(pid: u32) -> bool {
+    platform::is_process_alive(pid)
+}
+
 #[cfg(target_os = "windows")]
 mod platform {
     use super::{
@@ -622,14 +1016,16 @@ mod platform {
     use windows::Win32::Graphics::Dxgi::{
         CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, IDXGIFactory1,
     };
+    use windows::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
     use windows::Win32::System::Performance::{
         PDH_CSTATUS_NEW_DATA, PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_DOUBLE,
         PDH_HCOUNTER, PDH_HQUERY, PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData,
         PdhGetFormattedCounterArrayW, PdhOpenQueryW,
     };
     use windows::Win32::System::Threading::{
-        GetActiveProcessorGroupCount, GetExitCodeProcess, GetSystemTimes, OpenProcess,
-        PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+        CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, GetActiveProcessorGroupCount,
+        GetExitCodeProcess, GetProcessTimes, GetSystemTimes, OpenProcess, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
     };
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
     use windows::core::{PCWSTR, PWSTR};
@@ -704,6 +1100,39 @@ mod platform {
             && exit_code == STILL_ACTIVE.0 as u32;
         let _ = unsafe { CloseHandle(handle) };
         ok
+    }
+
+    /// Process-creation stamp (100-ns units) used to detect PID reuse: a PID
+    /// reports alive only when the creation time matches what we captured.
+    pub fn process_creation_stamp(pid: u32) -> Option<u64> {
+        let Ok(handle) = (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) })
+        else {
+            return None;
+        };
+        let (mut creation, mut exit, mut kernel, mut user) = (
+            FILETIME::default(),
+            FILETIME::default(),
+            FILETIME::default(),
+            FILETIME::default(),
+        );
+        let ok =
+            unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) }
+                .is_ok();
+        let _ = unsafe { CloseHandle(handle) };
+        if !ok {
+            return None;
+        }
+        Some(((creation.dwHighDateTime as u64) << 32) | creation.dwLowDateTime as u64)
+    }
+
+    /// Creation flags for the PresentMon child: separate process group so a
+    /// CTRL_BREAK reaches only the child, and no console window.
+    pub const CAPTURE_CREATION_FLAGS: u32 = CREATE_NEW_PROCESS_GROUP.0 | CREATE_NO_WINDOW.0;
+
+    /// Ask a child console process (in its own group) to shut down gracefully;
+    /// PresentMon treats this like Ctrl+C and closes its ETW session cleanly.
+    pub fn signal_console_break(pid: u32) -> bool {
+        unsafe { GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid) }.is_ok()
     }
 
     pub fn enumerate_dxgi_adapters() -> Vec<GpuAdapterInfo> {
@@ -911,14 +1340,17 @@ mod platform {
                 };
             }
             if buffer_size == 0 {
+                // No active GPU Engine instances at all — that is "no data",
+                // not "0% utilization" (engines idle off the counter set).
                 return GpuTelemetry {
-                    utilization: Metric::available(
+                    utilization: Metric::missing(
                         "gpu_utilization_percent",
-                        0.0,
                         "percent",
-                        &format!("PDH GPU Engine ({adapter_label}: Busiest engine 3D)"),
+                        "PDH GPU Engine",
                         timestamp,
                         interval,
+                        MetricStatus::Unavailable,
+                        "No active WDDM GPU Engine counter instances reported this sample.",
                     ),
                     selected_adapter: selected,
                     available_adapters: self.adapters.clone(),
@@ -1071,6 +1503,13 @@ mod platform {
     pub fn is_process_alive(_pid: u32) -> bool {
         false
     }
+    pub fn process_creation_stamp(_pid: u32) -> Option<u64> {
+        None
+    }
+    pub const CAPTURE_CREATION_FLAGS: u32 = 0;
+    pub fn signal_console_break(_pid: u32) -> bool {
+        false
+    }
     pub struct PlatformGpuSensor;
     impl PlatformGpuSensor {
         pub fn new() -> Self {
@@ -1213,5 +1652,69 @@ mod tests {
                 assert!((0.0..=100.0).contains(&val));
             }
         }
+    }
+
+    fn pm_columns() -> std::collections::HashMap<String, usize> {
+        parse_csv_record(
+            "Application,ProcessID,SwapChainAddress,Runtime,SyncInterval,PresentFlags,PresentMode,Dropped,TimeInSeconds,MsInPresentAPI,MsBetweenPresents,MsUntilDisplayed",
+        )
+        .iter()
+        .enumerate()
+        .map(|(i, c)| (c.trim().to_ascii_lowercase(), i))
+        .collect()
+    }
+
+    #[test]
+    fn csv_record_parser_handles_quotes_and_commas() {
+        let fields = parse_csv_record("\"Game, With Comma.exe\",1234,0xAB12,0");
+        assert_eq!(fields[0], "Game, With Comma.exe");
+        assert_eq!(fields[1], "1234");
+        let escaped = parse_csv_record("\"Weird \"\"quote\"\" app.exe\",99,0x1");
+        assert_eq!(escaped[0], "Weird \"quote\" app.exe");
+    }
+
+    #[test]
+    fn presentmon_frames_require_matching_pid_and_real_swapchain() {
+        let columns = pm_columns();
+        let row = |pid: u32, swapchain: &str, ms: &str| {
+            format!("game.exe,{pid},{swapchain},DXGI,1,0,Composed: Flip,0,12.345,1.0,{ms},9.9")
+        };
+        // Matching PID + nonzero swapchain → frame parsed.
+        let frame = parse_presentmon_frame(&row(4242, "0x00001F2B", "16.6"), &columns, 4242, 1000)
+            .expect("valid frame");
+        assert!((frame.ms_between_presents - 16.6).abs() < 0.01);
+        assert!(!frame.dropped);
+        assert_eq!(frame.until_displayed_ms, Some(9.9));
+
+        // Different PID → rejected (process filter enforced).
+        assert!(
+            parse_presentmon_frame(&row(9999, "0x00001F2B", "16.6"), &columns, 4242, 1000)
+                .is_none()
+        );
+        // Zero swapchain (discarded present) → rejected.
+        assert!(parse_presentmon_frame(&row(4242, "0", "16.6"), &columns, 4242, 1000).is_none());
+        assert!(parse_presentmon_frame(&row(4242, "0x0", "16.6"), &columns, 4242, 1000).is_none());
+        // Out-of-range and unparsable frame times rejected.
+        assert!(parse_presentmon_frame(&row(4242, "0x1", "0.0"), &columns, 4242, 1000).is_none());
+        assert!(parse_presentmon_frame(&row(4242, "0x1", "99999"), &columns, 4242, 1000).is_none());
+        assert!(parse_presentmon_frame(&row(4242, "0x1", "NaN"), &columns, 4242, 1000).is_none());
+        // Quoted application name containing a comma must not shift columns.
+        let quoted = " \"my, game.exe\" ,4242,0x1,DXGI,1,0,Flip,1,1.0,1.0,8.3,5.0";
+        let f2 = parse_presentmon_frame(quoted, &columns, 4242, 1000).expect("quoted frame");
+        assert!(f2.dropped);
+    }
+
+    #[test]
+    fn presentmon_capability_probe_parses_help() {
+        // Feeding representative upstream help text through flag detection.
+        let help = "PresentMon 2.3\n  --process_id <id>  capture only this process\n  --output_stdout\n  --no_top  disable console table\n  --session_name <name>\n  --terminate_on_proc_exit\n";
+        let lower = help.to_ascii_lowercase();
+        let has_flag = |name: &str| {
+            lower.contains(&format!("--{name}")) || lower.contains(&format!("-{name}"))
+        };
+        assert!(has_flag("process_id"));
+        assert!(has_flag("session_name"));
+        assert!(has_flag("terminate_on_proc_exit"));
+        assert!(!has_flag("no_console_stats"));
     }
 }

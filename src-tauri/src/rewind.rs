@@ -5,19 +5,83 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-const REWIND_SCHEMA_VERSION: u32 = 1;
+const REWIND_SCHEMA_VERSION: u32 = 2;
 const REWIND_JOURNAL_LIMIT: usize = 200;
 static REWIND_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Optimization Rewind V2 lifecycle.
+///
+/// Every reversible mutation moves through the obligation side
+/// (`prepared` -> `applied_verified` | `outcome_uncertain` | `failed_before_mutation`)
+/// and the restoration side (`restoration_pending` -> `restored` |
+/// `external_change_preserved`). `recovery_required` marks entries that still
+/// need reconciliation but could not be inspected. Any non-terminal state
+/// retains its restoration obligation and is never evicted by retention limits.
+///
+/// Schema v1 names are accepted on load through serde aliases:
+/// `pending` -> `prepared`, `active` -> `applied_verified`,
+/// `failed` -> `outcome_uncertain`, `conflict_skipped` -> `external_change_preserved`.
+/// Legacy `failed` entries must map to `outcome_uncertain` (not
+/// `failed_before_mutation`) because v1 could not distinguish whether the OS
+/// mutation had already run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RewindStatus {
-    Pending,
-    Active,
+    /// Intent persisted; the native mutation has not yet been confirmed.
+    #[serde(alias = "pending")]
+    Prepared,
+    /// Mutation confirmed applied; restoration obligation is live.
+    #[serde(alias = "active")]
+    AppliedVerified,
+    /// The mutation may have been applied but verification could not prove it.
+    #[serde(alias = "failed")]
+    OutcomeUncertain,
+    /// Restoration is needed but an attempt failed or was interrupted.
+    RestorationPending,
+    /// Live state matches the recorded baseline (by restore or reconciliation).
     Restored,
-    ConflictSkipped,
-    Failed,
+    /// Live state no longer matches what MemFlux applied; preserved external choice.
+    #[serde(alias = "conflict_skipped")]
+    ExternalChangePreserved,
+    /// Startup recovery could not inspect or resolve this entry.
+    RecoveryRequired,
+    /// The mutation call itself failed; no system mutation occurred.
+    FailedBeforeMutation,
+    /// Recorded action is not reversible.
     Irreversible,
+}
+
+impl RewindStatus {
+    /// True while the entry still carries a restoration obligation.
+    pub fn is_unresolved(self) -> bool {
+        matches!(
+            self,
+            RewindStatus::Prepared
+                | RewindStatus::AppliedVerified
+                | RewindStatus::OutcomeUncertain
+                | RewindStatus::RestorationPending
+                | RewindStatus::RecoveryRequired
+        )
+    }
+
+    pub fn is_terminal(self) -> bool {
+        !self.is_unresolved()
+    }
+
+    /// Human-facing label for the UI.
+    pub fn label(self) -> &'static str {
+        match self {
+            RewindStatus::Prepared => "prepared",
+            RewindStatus::AppliedVerified => "applied (verified)",
+            RewindStatus::OutcomeUncertain => "outcome uncertain",
+            RewindStatus::RestorationPending => "restoration pending",
+            RewindStatus::Restored => "restored",
+            RewindStatus::ExternalChangePreserved => "external change preserved",
+            RewindStatus::RecoveryRequired => "recovery required",
+            RewindStatus::FailedBeforeMutation => "failed (no change applied)",
+            RewindStatus::Irreversible => "irreversible",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,19 +127,25 @@ impl RewindJournal {
         self.entries.iter().cloned().collect()
     }
 
+    /// Entries that still carry a live restoration obligation and are
+    /// reversible. Includes verified-active changes *and* uncertain ones.
     pub fn active_entries(&self) -> Vec<RewindEntry> {
         self.entries
             .iter()
-            .filter(|e| e.status == RewindStatus::Active)
+            .filter(|e| e.reversible && e.status.is_unresolved())
             .cloned()
             .collect()
     }
 
+    /// Newest unresolved reversible entry for a target. Used for baseline
+    /// chaining so repeated changes restore to the user's true original state.
     pub fn active_for_target(&self, target_identity: &str) -> Option<RewindEntry> {
         self.entries
             .iter()
             .rev()
-            .find(|e| e.target_identity == target_identity && e.status == RewindStatus::Active)
+            .find(|e| {
+                e.target_identity == target_identity && e.reversible && e.status.is_unresolved()
+            })
             .cloned()
     }
 
@@ -94,8 +164,8 @@ impl RewindJournal {
         reversible: bool,
         timestamp_ms: u64,
     ) -> Result<RewindEntry, String> {
-        // If there is already an Active entry for the same target, preserve its original previous_state
-        // so chained GameFocus/PowerShift changes restore back to the user's true original baseline.
+        // If there is already an unresolved entry for the same target, preserve its
+        // original previous_state so chained changes restore to the true baseline.
         let (baseline_state, baseline_label) =
             if let Some(existing) = self.active_for_target(target_identity) {
                 (existing.previous_state, existing.previous_state_label)
@@ -120,20 +190,19 @@ impl RewindJournal {
             restoration_method: restoration_method.to_owned(),
             reversible,
             status: if reversible {
-                RewindStatus::Pending
+                RewindStatus::Prepared
             } else {
                 RewindStatus::Irreversible
             },
             error_detail: None,
         };
-        if self.entries.len() >= REWIND_JOURNAL_LIMIT {
-            self.entries.pop_front();
-        }
         self.entries.push_back(entry.clone());
+        self.enforce_limit();
         self.persist()?;
         Ok(entry)
     }
 
+    /// The native mutation was verified applied. Carries the observed state.
     pub fn confirm_mutation_applied(
         &mut self,
         action_id: &str,
@@ -146,12 +215,14 @@ impl RewindJournal {
             .map(|e| e.target_identity.clone())
             .ok_or_else(|| format!("Rewind entry '{action_id}' not found."))?;
 
-        // Supersede older Active entries for the same target since the new entry carries the original baseline
+        // Supersede older unresolved entries for the same target; the new entry
+        // retains the original baseline.
         let now = crate::telemetry::timestamp_ms();
         for item in &mut self.entries {
             if item.target_identity == target_identity
                 && item.action_id != action_id
-                && item.status == RewindStatus::Active
+                && item.reversible
+                && item.status.is_unresolved()
             {
                 item.status = RewindStatus::Restored;
                 item.restored_timestamp_ms = Some(now);
@@ -168,14 +239,16 @@ impl RewindJournal {
             .ok_or_else(|| format!("Rewind entry '{action_id}' not found."))?;
         entry.observed_applied_state = Some(observed_applied_state.to_owned());
         if entry.reversible {
-            entry.status = RewindStatus::Active;
+            entry.status = RewindStatus::AppliedVerified;
         }
         let cloned = entry.clone();
         self.persist()?;
         Ok(cloned)
     }
 
-    pub fn mark_mutation_failed(
+    /// The mutation call itself failed before any system mutation. Only use
+    /// when it is *known* that no OS change occurred.
+    pub fn mark_failed_before_mutation(
         &mut self,
         action_id: &str,
         error: &str,
@@ -185,13 +258,40 @@ impl RewindJournal {
             .iter_mut()
             .find(|e| e.action_id == action_id)
             .ok_or_else(|| format!("Rewind entry '{action_id}' not found."))?;
-        entry.status = RewindStatus::Failed;
+        entry.status = RewindStatus::FailedBeforeMutation;
         entry.error_detail = Some(error.to_owned());
         let cloned = entry.clone();
         self.persist()?;
         Ok(cloned)
     }
 
+    /// The mutation may have succeeded but verification (or a later journal
+    /// step) failed. The entry keeps its restoration obligation; optionally
+    /// records the state actually observed after the mutation.
+    pub fn mark_outcome_uncertain(
+        &mut self,
+        action_id: &str,
+        observed_state: Option<&str>,
+        error: &str,
+    ) -> Result<RewindEntry, String> {
+        let entry = self
+            .entries
+            .iter_mut()
+            .find(|e| e.action_id == action_id)
+            .ok_or_else(|| format!("Rewind entry '{action_id}' not found."))?;
+        entry.status = RewindStatus::OutcomeUncertain;
+        if let Some(observed) = observed_state {
+            entry.observed_applied_state = Some(observed.to_owned());
+        }
+        entry.error_detail = Some(format!("Outcome uncertain: {error}"));
+        let cloned = entry.clone();
+        self.persist()?;
+        Ok(cloned)
+    }
+
+    /// Evaluate one entry against live state and restore it if MemFlux's
+    /// change is still active. Reconciles `prepared` and `outcome_uncertain`
+    /// entries via the live read — no blind mutation or blind failure.
     pub fn restore_entry<R, A>(
         &mut self,
         action_id: &str,
@@ -215,14 +315,15 @@ impl RewindJournal {
                 "This action is marked irreversible and cannot be automatically restored.".into(),
             );
         }
-        if current_entry.status == RewindStatus::Restored {
+        if current_entry.status.is_terminal() {
             return Ok(current_entry);
         }
 
         let live_state = match read_current_state(&current_entry.target_identity) {
             Ok(state) => state,
             Err(error) => {
-                self.entries[idx].status = RewindStatus::Failed;
+                // We could not inspect the system; obligation must be recoverable later.
+                self.entries[idx].status = RewindStatus::RecoveryRequired;
                 self.entries[idx].error_detail = Some(format!(
                     "Could not inspect current state before restore: {error}"
                 ));
@@ -232,7 +333,7 @@ impl RewindJournal {
             }
         };
 
-        // Idempotent check: if the live state already matches previous_state, mark Restored
+        // Idempotent: live state already equals the recorded baseline.
         if live_state.eq_ignore_ascii_case(&current_entry.previous_state) {
             self.entries[idx].status = RewindStatus::Restored;
             self.entries[idx].restored_timestamp_ms = Some(now_ms);
@@ -242,14 +343,14 @@ impl RewindJournal {
             return Ok(out);
         }
 
-        // Compare-before-restore: if live state no longer matches what MemFlux applied,
-        // the user or OS changed it externally. Never overwrite external user selection!
+        // Compare-before-restore: if live state no longer matches what MemFlux
+        // applied (or intended), an external actor changed it — never overwrite.
         let expected_applied = current_entry
             .observed_applied_state
             .as_deref()
             .unwrap_or(&current_entry.intended_new_state);
         if !live_state.eq_ignore_ascii_case(expected_applied) {
-            self.entries[idx].status = RewindStatus::ConflictSkipped;
+            self.entries[idx].status = RewindStatus::ExternalChangePreserved;
             self.entries[idx].restored_timestamp_ms = Some(now_ms);
             self.entries[idx].error_detail = Some(format!(
                 "External change detected: current state '{}' differs from MemFlux's applied state '{}'. Preserved external configuration instead of overwriting with '{}'.",
@@ -272,15 +373,17 @@ impl RewindJournal {
                 self.entries[idx].error_detail = None;
             }
             Ok(observed_after_restore) => {
-                self.entries[idx].status = RewindStatus::Failed;
+                self.entries[idx].status = RewindStatus::RestorationPending;
                 self.entries[idx].error_detail = Some(format!(
-                    "Restore command ran, but observed state '{}' did not match expected '{}'.",
-                    observed_after_restore, current_entry.previous_state
+                    "Restore ran, but observed state '{observed_after_restore}' did not match expected '{}'; obligation retained for retry.",
+                    current_entry.previous_state
                 ));
             }
             Err(error) => {
-                self.entries[idx].status = RewindStatus::Failed;
-                self.entries[idx].error_detail = Some(error);
+                self.entries[idx].status = RewindStatus::RestorationPending;
+                self.entries[idx].error_detail = Some(format!(
+                    "Restore attempt failed; obligation retained for retry: {error}"
+                ));
             }
         }
 
@@ -289,6 +392,7 @@ impl RewindJournal {
         Ok(out)
     }
 
+    /// Restore every unresolved reversible entry, newest-first.
     pub fn restore_all_eligible<R, A>(
         &mut self,
         now_ms: u64,
@@ -303,7 +407,7 @@ impl RewindJournal {
             .entries
             .iter()
             .rev()
-            .filter(|e| e.status == RewindStatus::Active && e.reversible)
+            .filter(|e| e.reversible && e.status.is_unresolved())
             .map(|e| e.action_id.clone())
             .collect();
         let mut results = Vec::with_capacity(ids.len());
@@ -317,30 +421,41 @@ impl RewindJournal {
         results
     }
 
+    /// Startup reconciliation: every unresolved entry is inspected against live
+    /// state. Entries whose live state already matches the baseline resolve to
+    /// `restored`; live state matching the applied state is restored; external
+    /// changes are preserved; uninspectable entries become `recovery_required`.
+    /// Unlike v1, `prepared` entries are reconciled — never blind-failed.
     pub fn recover_on_startup<R, A>(
         &mut self,
         now_ms: u64,
-        mut read_current_state: R,
-        mut apply_restore: A,
+        read_current_state: R,
+        apply_restore: A,
     ) -> Vec<RewindEntry>
     where
         R: FnMut(&str) -> Result<String, String>,
         A: FnMut(&str, &str) -> Result<String, String>,
     {
-        // Clean up any incomplete Pending entries that never reached Active before a crash
-        for entry in &mut self.entries {
-            if entry.status == RewindStatus::Pending {
-                entry.status = RewindStatus::Failed;
-                entry.error_detail = Some(
-                    "Entry was pending when the previous session exited; marked failed without blind mutation."
-                        .into(),
-                );
-            }
-        }
-        let recovered =
-            self.restore_all_eligible(now_ms, &mut read_current_state, &mut apply_restore);
+        let recovered = self.restore_all_eligible(now_ms, read_current_state, apply_restore);
         let _ = self.persist();
         recovered
+    }
+
+    /// Never evict an unresolved restoration obligation to satisfy retention.
+    fn enforce_limit(&mut self) {
+        while self.entries.len() > REWIND_JOURNAL_LIMIT {
+            match self.entries.iter().position(|e| e.status.is_terminal()) {
+                Some(pos) => {
+                    self.entries.remove(pos);
+                }
+                None => {
+                    log::warn!(
+                        "Rewind journal holds more than {REWIND_JOURNAL_LIMIT} unresolved obligations; retaining all until resolved."
+                    );
+                    break;
+                }
+            }
+        }
     }
 
     fn persist(&self) -> Result<(), String> {
@@ -373,11 +488,19 @@ fn load_entries(path: &Path) -> VecDeque<RewindEntry> {
         return VecDeque::new();
     };
     match serde_json::from_str::<RewindJournalFile>(&raw) {
-        Ok(mut file) if file.schema_version == REWIND_SCHEMA_VERSION => {
-            while file.entries.len() > REWIND_JOURNAL_LIMIT {
-                file.entries.pop_front();
+        // Schema 1 entries deserialize through status aliases into v2 states.
+        Ok(file) if file.schema_version == 1 || file.schema_version == REWIND_SCHEMA_VERSION => {
+            let mut journal_entries = file.entries;
+            // Enforce limit on load without dropping unresolved obligations.
+            while journal_entries.len() > REWIND_JOURNAL_LIMIT {
+                match journal_entries.iter().position(|e| e.status.is_terminal()) {
+                    Some(pos) => {
+                        journal_entries.remove(pos);
+                    }
+                    None => break,
+                }
             }
-            file.entries
+            journal_entries
         }
         _ => {
             log::warn!(
@@ -402,6 +525,14 @@ mod tests {
         std::env::temp_dir()
             .join(format!("memflux-rewind-test-{label}-{nonce}"))
             .join("rewind-journal.json")
+    }
+
+    fn cleanup(path: &Path) {
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(path.with_extension("json.new"));
+        if let Some(p) = path.parent() {
+            let _ = fs::remove_dir(p);
+        }
     }
 
     #[test]
@@ -455,11 +586,7 @@ mod tests {
             )
             .expect("repeat restore");
         assert_eq!(repeat.status, RewindStatus::Restored);
-
-        let _ = fs::remove_file(&path);
-        if let Some(p) = path.parent() {
-            let _ = fs::remove_dir(p);
-        }
+        cleanup(&path);
     }
 
     #[test]
@@ -501,7 +628,7 @@ mod tests {
             )
             .expect("conflict check");
 
-        assert_eq!(outcome.status, RewindStatus::ConflictSkipped);
+        assert_eq!(outcome.status, RewindStatus::ExternalChangePreserved);
         assert_eq!(*state.borrow(), "scheme-c");
         assert!(
             outcome
@@ -509,11 +636,7 @@ mod tests {
                 .unwrap_or_default()
                 .contains("External change detected")
         );
-
-        let _ = fs::remove_file(&path);
-        if let Some(p) = path.parent() {
-            let _ = fs::remove_dir(p);
-        }
+        cleanup(&path);
     }
 
     #[test]
@@ -542,7 +665,6 @@ mod tests {
                 .expect("confirm");
         }
 
-        // Simulate restart by loading from disk and running recover_on_startup
         let mut reloaded = RewindJournal::load(path.clone());
         assert_eq!(reloaded.active_entries().len(), 1);
         let recovered = reloaded.recover_on_startup(
@@ -556,10 +678,275 @@ mod tests {
         assert_eq!(recovered.len(), 1);
         assert_eq!(recovered[0].status, RewindStatus::Restored);
         assert_eq!(*state.borrow(), "scheme-a");
+        cleanup(&path);
+    }
 
-        let _ = fs::remove_file(&path);
-        if let Some(p) = path.parent() {
-            let _ = fs::remove_dir(p);
+    #[test]
+    fn unconfirmed_mutation_recovers_via_live_state_inspection() {
+        // Simulates crash between a successful OS mutation and journal confirm:
+        // the entry stays `prepared` on disk while live state shows the change.
+        let path = temp_journal_path("uncertain-crash");
+        let state = RefCell::new("scheme-a".to_string());
+        {
+            let mut journal = RewindJournal::load(path.clone());
+            journal
+                .record_before_mutation(
+                    "powershift",
+                    None,
+                    "windows_active_power_scheme",
+                    "scheme-a",
+                    "Balanced",
+                    "scheme-b",
+                    "High performance",
+                    "user_explicit",
+                    "PowerSetActiveScheme",
+                    true,
+                    1_000,
+                )
+                .expect("record");
+            // Mutation actually happened but confirm_mutation_applied never ran.
+            *state.borrow_mut() = "scheme-b".into();
         }
+
+        let mut reloaded = RewindJournal::load(path.clone());
+        let recovered = reloaded.recover_on_startup(
+            5_000,
+            |_| Ok(state.borrow().clone()),
+            |_, target| {
+                *state.borrow_mut() = target.to_owned();
+                Ok(target.to_owned())
+            },
+        );
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].status, RewindStatus::Restored);
+        assert_eq!(*state.borrow(), "scheme-a");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn outcome_uncertain_entries_are_restored_when_change_is_live() {
+        let path = temp_journal_path("uncertain-restore");
+        let state = RefCell::new("scheme-b".to_string());
+        let mut journal = RewindJournal::load(path.clone());
+        let pending = journal
+            .record_before_mutation(
+                "powershift",
+                None,
+                "windows_active_power_scheme",
+                "scheme-a",
+                "Balanced",
+                "scheme-b",
+                "High performance",
+                "user_explicit",
+                "PowerSetActiveScheme",
+                true,
+                1_000,
+            )
+            .expect("record");
+        journal
+            .mark_outcome_uncertain(&pending.action_id, Some("scheme-b"), "verification failed")
+            .expect("mark uncertain");
+
+        let recovered = journal.restore_entry(
+            &pending.action_id,
+            2_000,
+            |_| Ok(state.borrow().clone()),
+            |_, target| {
+                *state.borrow_mut() = target.to_owned();
+                Ok(target.to_owned())
+            },
+        );
+        assert_eq!(recovered.expect("restore").status, RewindStatus::Restored);
+        assert_eq!(*state.borrow(), "scheme-a");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn failed_before_mutation_entries_are_not_restored() {
+        let path = temp_journal_path("no-mutation");
+        let state = RefCell::new("scheme-a".to_string());
+        let mut journal = RewindJournal::load(path.clone());
+        let pending = journal
+            .record_before_mutation(
+                "powershift",
+                None,
+                "windows_active_power_scheme",
+                "scheme-a",
+                "Balanced",
+                "scheme-b",
+                "High performance",
+                "user_explicit",
+                "PowerSetActiveScheme",
+                true,
+                1_000,
+            )
+            .expect("record");
+        journal
+            .mark_failed_before_mutation(&pending.action_id, "PowerSetActiveScheme returned error")
+            .expect("mark failed");
+
+        // Startup recovery must not touch this entry at all.
+        let recovered = journal.recover_on_startup(
+            5_000,
+            |_| Ok(state.borrow().clone()),
+            |_, _| panic!("must not attempt restore"),
+        );
+        assert!(recovered.is_empty());
+        let stored = journal
+            .entries()
+            .into_iter()
+            .find(|e| e.action_id == pending.action_id)
+            .expect("entry");
+        assert_eq!(stored.status, RewindStatus::FailedBeforeMutation);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn restore_failure_keeps_obligation_pending_for_retry() {
+        let path = temp_journal_path("pending");
+        let state = RefCell::new("scheme-b".to_string());
+        let mut journal = RewindJournal::load(path.clone());
+        let pending = journal
+            .record_before_mutation(
+                "powershift",
+                None,
+                "windows_active_power_scheme",
+                "scheme-a",
+                "Balanced",
+                "scheme-b",
+                "High performance",
+                "user_explicit",
+                "PowerSetActiveScheme",
+                true,
+                1_000,
+            )
+            .expect("record");
+        journal
+            .confirm_mutation_applied(&pending.action_id, "scheme-b")
+            .expect("confirm");
+
+        let first = journal
+            .restore_entry(
+                &pending.action_id,
+                2_000,
+                |_| Ok(state.borrow().clone()),
+                |_, _| Err("simulated transient failure".into()),
+            )
+            .expect("restore attempt");
+        assert_eq!(first.status, RewindStatus::RestorationPending);
+        assert!(first.status.is_unresolved());
+
+        // Retry succeeds once the failure clears.
+        let second = journal
+            .restore_entry(
+                &pending.action_id,
+                3_000,
+                |_| Ok(state.borrow().clone()),
+                |_, target| {
+                    *state.borrow_mut() = target.to_owned();
+                    Ok(target.to_owned())
+                },
+            )
+            .expect("retry");
+        assert_eq!(second.status, RewindStatus::Restored);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn unresolved_obligations_survive_retention_limit() {
+        let path = temp_journal_path("retention");
+        let mut journal = RewindJournal::load(path.clone());
+        // Fill with unresolved entries beyond the limit.
+        for i in 0..(REWIND_JOURNAL_LIMIT + 10) {
+            journal
+                .record_before_mutation(
+                    "test",
+                    None,
+                    &format!("target_{i}"),
+                    "a",
+                    "A",
+                    "b",
+                    "B",
+                    "test",
+                    "test",
+                    true,
+                    i as u64,
+                )
+                .expect("record");
+        }
+        let entries = journal.entries();
+        assert!(entries.len() > REWIND_JOURNAL_LIMIT);
+        assert!(entries.iter().all(|e| e.status.is_unresolved()));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn terminal_entries_are_evicted_before_unresolved() {
+        let path = temp_journal_path("retention-order");
+        let mut journal = RewindJournal::load(path.clone());
+        let unresolved = journal
+            .record_before_mutation(
+                "test", None, "keep-me", "a", "A", "b", "B", "test", "test", true, 1,
+            )
+            .expect("record unresolved");
+        for i in 0..(REWIND_JOURNAL_LIMIT + 5) {
+            let e = journal
+                .record_before_mutation(
+                    "test",
+                    None,
+                    &format!("terminal_{i}"),
+                    "a",
+                    "A",
+                    "b",
+                    "B",
+                    "test",
+                    "test",
+                    true,
+                    10 + i as u64,
+                )
+                .expect("record");
+            journal
+                .mark_failed_before_mutation(&e.action_id, "no mutation")
+                .expect("mark terminal");
+        }
+        let entries = journal.entries();
+        assert!(entries.len() <= REWIND_JOURNAL_LIMIT);
+        assert!(entries.iter().any(|e| e.action_id == unresolved.action_id));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn schema_v1_journal_migrates_failed_to_outcome_uncertain() {
+        let path = temp_journal_path("v1-migration");
+        let v1 = serde_json::json!({
+            "schemaVersion": 1,
+            "entries": [{
+                "actionId": "rewind-1-1",
+                "initiatingFeature": "powershift",
+                "sessionId": null,
+                "targetIdentity": "windows_active_power_scheme",
+                "previousState": "scheme-a",
+                "previousStateLabel": "Balanced",
+                "intendedNewState": "scheme-b",
+                "intendedNewStateLabel": "High performance",
+                "observedAppliedState": null,
+                "timestampMs": 1000,
+                "restoredTimestampMs": null,
+                "authorization": "user_explicit",
+                "restorationMethod": "PowerSetActiveScheme",
+                "reversible": true,
+                "status": "failed",
+                "errorDetail": "legacy failure"
+            }]
+        });
+        fs::create_dir_all(path.parent().expect("dir")).expect("mkdir");
+        fs::write(&path, serde_json::to_string(&v1).expect("json")).expect("write v1");
+
+        let journal = RewindJournal::load(path.clone());
+        let entries = journal.entries();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].status, RewindStatus::OutcomeUncertain);
+        assert!(entries[0].status.is_unresolved());
+        cleanup(&path);
     }
 }

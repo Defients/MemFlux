@@ -10,6 +10,7 @@ import type {
   GameProfile,
   PowerShiftMode,
   PowerShiftOutcome,
+  ProofReport,
   RewindEntry,
   RuntimeStatus,
   SettingsEnvelope,
@@ -35,6 +36,10 @@ export const native = {
   startFpsCapture: (pid: number, executableName: string) =>
     invoke<FpsCaptureStatus>("start_fps_capture", { pid, executableName }),
   stopFpsCapture: () => invoke<FpsCaptureStatus>("stop_fps_capture"),
+  beginProofSession: () => invoke<ProofReport>("begin_proof_session"),
+  markProofChange: (label?: string) => invoke<ProofReport>("mark_proof_change", { label: label ?? null }),
+  proofSessionStatus: () => invoke<ProofReport>("proof_session_status"),
+  endProofSession: () => invoke<ProofReport>("end_proof_session"),
   updateSettings: (settings: AppSettings) => invoke<AppSettings>("update_settings", { settings }),
   setPaused: (paused: boolean) => invoke<boolean>("set_monitoring_paused", { paused }),
   onFrame: (handler: (frame: TelemetryFrame) => void): Promise<UnlistenFn> =>

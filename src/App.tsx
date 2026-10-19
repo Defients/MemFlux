@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { useMemFlux } from "./hooks/useMemFlux";
+import { native } from "./lib/native";
 import { PerformanceHud } from "./components/PerformanceHud";
 import {
   availablePercent,
@@ -25,10 +26,40 @@ import type {
   PageId,
   PowerShiftMode,
   PressureLevel,
+  ProofReport,
   RuntimeStatus,
   SettingsEnvelope,
   TelemetryFrame
 } from "./types";
+
+// Rewind V2 lifecycle: entries carrying a live restoration obligation.
+const REWIND_UNRESOLVED: ReadonlySet<string> = new Set([
+  "prepared",
+  "applied_verified",
+  "outcome_uncertain",
+  "restoration_pending",
+  "recovery_required",
+  // Legacy v1 names (only seen if the journal was written by V4.1 and read pre-migration)
+  "active",
+  "pending"
+]);
+
+const REWIND_TAG_CLASS: Record<string, string> = {
+  prepared: "tag-warming_up",
+  applied_verified: "tag-warming_up",
+  outcome_uncertain: "tag-unavailable",
+  restoration_pending: "tag-unavailable",
+  recovery_required: "tag-error",
+  restored: "tag-available",
+  external_change_preserved: "tag-available",
+  failed_before_mutation: "tag-unavailable",
+  irreversible: "tag-unavailable",
+  // Legacy aliases
+  active: "tag-warming_up",
+  pending: "tag-warming_up",
+  conflict_skipped: "tag-available",
+  failed: "tag-unavailable"
+};
 
 const NAVIGATION: Array<{ id: PageId; label: string; caption: string; icon: IconName }> = [
   { id: "overview", label: "Overview", caption: "System & cleaner", icon: "overview" },
@@ -1152,12 +1183,18 @@ function PerformanceControlPage({
           </div>
           <button
             className="button button-quiet"
-            disabled={!rewindEntries.some((e) => e.status === "active")}
+            disabled={!rewindEntries.some((e) => e.reversible && REWIND_UNRESOLVED.has(e.status))}
             onClick={() => void onRestoreAllRewind()}
           >
-            Restore All Active Changes
+            Restore All Pending Changes
           </button>
         </div>
+
+        {rewindEntries.some((e) => e.status === "outcome_uncertain" || e.status === "recovery_required" || e.status === "restoration_pending") && (
+          <p className="panel-note" style={{ color: "var(--status-warning)" }}>
+            Some MemFlux changes have uncertain or unfinished restoration outcomes. They remain recoverable — MemFlux re-checks them on every restore pass and at startup.
+          </p>
+        )}
 
         {rewindEntries.length > 0 ? (
           <div className="sensor-table-wrap">
@@ -1186,13 +1223,13 @@ function PerformanceControlPage({
                       </div>
                     </td>
                     <td>
-                      <span className={`availability-tag ${entry.status === "active" ? "tag-warming_up" : entry.status === "restored" ? "tag-available" : "tag-unavailable"}`}>
+                      <span className={`availability-tag ${REWIND_TAG_CLASS[entry.status] ?? "tag-unavailable"}`}>
                         {entry.status.replaceAll("_", " ")}
                       </span>
                       {entry.errorDetail && <small className="sensor-detail">{entry.errorDetail}</small>}
                     </td>
                     <td>
-                      {entry.status === "active" && entry.reversible ? (
+                      {entry.reversible && REWIND_UNRESOLVED.has(entry.status) ? (
                         <button className="button button-quiet" onClick={() => void onRestoreRewindEntry(entry.actionId)}>
                           Restore
                         </button>
@@ -1226,10 +1263,12 @@ function SensorRow({ label, metric, description }: { label: string; metric: Metr
 
 function IntelligencePage({
   frame,
+  history,
   onStartFpsCapture,
   onStopFpsCapture
 }: {
   frame: TelemetryFrame;
+  history: TelemetryFrame[];
   onStartFpsCapture: (pid: number, executableName: string) => Promise<void>;
   onStopFpsCapture: () => Promise<void>;
 }) {
@@ -1239,6 +1278,44 @@ function IntelligencePage({
   const competing = frame.coordinator?.gamefocus.competingWorkloads ?? [];
   const [manualPid, setManualPid] = useState("");
   const [manualExe, setManualExe] = useState("game.exe");
+  const [proof, setProof] = useState<ProofReport | null>(null);
+  const [proofBusy, setProofBusy] = useState(false);
+
+  const refreshProof = useCallback(() => {
+    native
+      .proofSessionStatus()
+      .then(setProof)
+      .catch(() => undefined);
+  }, []);
+  useEffect(() => {
+    refreshProof();
+  }, [refreshProof]);
+  useEffect(() => {
+    if (!proof?.active) return;
+    const timer = window.setInterval(refreshProof, 1_500);
+    return () => window.clearInterval(timer);
+  }, [proof?.active, refreshProof]);
+  const runProof = useCallback((action: () => Promise<ProofReport>) => {
+    setProofBusy(true);
+    action()
+      .then(setProof)
+      .catch(() => undefined)
+      .finally(() => setProofBusy(false));
+  }, []);
+
+  const stutters = fps?.recentStutters ?? [];
+  const correlate = (atMs: number) => {
+    let best: TelemetryFrame | null = null;
+    let bestDelta = Number.POSITIVE_INFINITY;
+    for (const item of history) {
+      const delta = Math.abs(item.snapshot.timestampMs - atMs);
+      if (delta < bestDelta) {
+        bestDelta = delta;
+        best = item;
+      }
+    }
+    return bestDelta <= 2_500 ? best : null;
+  };
 
   const sensors: Array<{ label: string; metric: Metric; description: string }> = [
     { label: "CPU utilization", metric: frame.cpuUtilization, description: "Overall CPU busy delta (idle included in kernel)" },
@@ -1350,6 +1427,149 @@ function IntelligencePage({
             </button>
           )}
         </div>
+      </section>
+
+      {fps?.active && (
+        <section className="panel sensor-panel" style={{ marginBottom: 14 }}>
+          <div className="panel-heading">
+            <div>
+              <span className="eyebrow">Stutter Detective</span>
+              <h2>Frame-time anomalies against a rolling baseline</h2>
+            </div>
+            <span className="sensor-caption">
+              {fps.stutterSummary
+                ? `${fps.stutterSummary.eventsLastMinute} event(s)/min · baseline p95 ${fps.stutterSummary.baselineP95Ms?.toFixed(1) ?? "—"} ms from ${fps.stutterSummary.baselineFrames} frames`
+                : "Warming up baseline"}
+            </span>
+          </div>
+          {stutters.length === 0 ? (
+            <p className="panel-note" style={{ marginTop: 10 }}>
+              <Icon name="info" size={16} />
+              <span>No frame-time anomalies detected yet. The detector needs ≥64 presented frames to establish a baseline.</span>
+            </p>
+          ) : (
+            <div className="sensor-table-wrap">
+              <table className="sensor-table">
+                <thead>
+                  <tr>
+                    <th>When</th>
+                    <th>Frame time</th>
+                    <th>Baseline p95</th>
+                    <th>Severity</th>
+                    <th>Correlated telemetry</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {stutters.slice().reverse().map((event) => {
+                    const match = correlate(event.atMs);
+                    const cpuV = match?.cpuUtilization.value;
+                    const gpuV = match?.gpuTelemetry?.utilization.value;
+                    const avail = match?.snapshot.availablePhysicalBytes.value;
+                    return (
+                      <tr key={event.id}>
+                        <td><small>{formatTimestamp(event.atMs)}</small></td>
+                        <td className="sensor-value">{event.frameTimeMs.toFixed(1)} ms</td>
+                        <td className="sensor-value">{event.baselineP95Ms.toFixed(1)} ms ({event.ratio.toFixed(1)}×)</td>
+                        <td>
+                          <span className={`availability-tag ${event.severity === "severe" || event.severity === "dropped_present" ? "tag-unavailable" : "tag-degraded"}`}>
+                            {event.dropped ? "dropped" : event.severity}
+                          </span>
+                        </td>
+                        <td>
+                          {match ? (
+                            <small>
+                              CPU {cpuV == null ? "—" : `${cpuV.toFixed(0)}%`} · GPU {gpuV == null ? "—" : `${gpuV.toFixed(0)}%`} · Free {avail == null ? "—" : formatBytes(avail, 0)}
+                            </small>
+                          ) : (
+                            <small>Outside retained telemetry window</small>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              <p className="settings-caveat" style={{ marginTop: 8 }}>
+                Anomalies are frame-time outliers vs. a rolling p95 baseline; the adjacent telemetry is correlation at matching timestamps — not causal proof.
+              </p>
+            </div>
+          )}
+        </section>
+      )}
+
+      <section className="panel sensor-panel" style={{ marginBottom: 14 }}>
+        <div className="panel-heading">
+          <div>
+            <span className="eyebrow">Performance Proof</span>
+            <h2>Measure whether a change actually helped</h2>
+          </div>
+          <span className={`availability-tag ${proof?.active ? "tag-available" : "tag-unavailable"}`}>
+            {proof?.active ? (proof.phase === "baseline" ? "Baseline Sampling" : "Post-change Sampling") : "Inactive"}
+          </span>
+        </div>
+        <p className="panel-note" style={{ marginTop: 10 }}>
+          <Icon name="info" size={16} />
+          <span>Start baseline sampling, apply your optimization (purge, PowerShift, GameFocus), mark the boundary, then finish to compare. Results show measured deltas — correlation, not causation.</span>
+        </p>
+        <div style={{ display: "flex", gap: 10, marginTop: 12, alignItems: "center", flexWrap: "wrap" }}>
+          {!proof?.active && (
+            <button className="button button-primary" disabled={proofBusy} onClick={() => runProof(() => native.beginProofSession())}>
+              Begin Baseline
+            </button>
+          )}
+          {proof?.active && proof.phase === "baseline" && (
+            <button className="button button-primary" disabled={proofBusy} onClick={() => runProof(() => native.markProofChange())}>
+              Mark Change Applied
+            </button>
+          )}
+          {proof?.active && (
+            <button className="button button-quiet" disabled={proofBusy} onClick={() => runProof(() => native.endProofSession())}>
+              Finish & Compare
+            </button>
+          )}
+          {proof?.active && (
+            <small className="sensor-caption">
+              baseline {proof.baselineSamples} sample(s){proof.phase === "post_change" ? ` · post ${proof.postSamples} sample(s)` : ""}
+            </small>
+          )}
+        </div>
+        {proof && proof.comparisons.length > 0 && (
+          <>
+            <p className="panel-note" style={{ marginTop: 12 }}>
+              <Icon name="info" size={16} />
+              <span>{proof.verdict}</span>
+            </p>
+            <div className="sensor-table-wrap">
+              <table className="sensor-table">
+                <thead>
+                  <tr>
+                    <th>Metric</th>
+                    <th>Baseline (mean ± σ)</th>
+                    <th>Post-change (mean ± σ)</th>
+                    <th>Δ</th>
+                    <th>Assessment</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {proof.comparisons.map((comparison) => (
+                    <tr key={comparison.metric}>
+                      <td><strong>{comparison.metric}</strong><small>{comparison.detail}</small></td>
+                      <td className="sensor-value">{comparison.baselineMean.toFixed(1)} ± {comparison.baselineStddev.toFixed(1)}</td>
+                      <td className="sensor-value">{comparison.postMean.toFixed(1)} ± {comparison.postStddev.toFixed(1)}</td>
+                      <td className="sensor-value">{comparison.delta >= 0 ? "+" : ""}{comparison.delta.toFixed(1)} {comparison.unit}</td>
+                      <td>
+                        <span className={`availability-tag ${comparison.direction === "improved" ? "tag-available" : comparison.direction === "regressed" ? "tag-unavailable" : "tag-degraded"}`}>
+                          {comparison.direction === "within_noise" ? "within noise" : comparison.direction}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {proof.caveat && <p className="settings-caveat" style={{ marginTop: 8 }}>{proof.caveat}</p>}
+          </>
+        )}
       </section>
 
       {competing.length > 0 && (
@@ -1497,6 +1717,28 @@ function SettingsPage({
 
         <section className="panel settings-section"><span className="eyebrow">Guardian & lifecycle</span><h2>Background behavior</h2><Toggle checked={draft.guardianEnabled} onChange={(value) => update("guardianEnabled", value)} label="Adaptive Guardian" description="Interpret memory pressure separately from manual cleaning." /><Toggle checked={draft.closeToTray} onChange={(value) => update("closeToTray", value)} label="Close to system tray" description="Keep the collector running when the dashboard closes." /></section>
         <section className="panel settings-section"><span className="eyebrow">Sampling policy</span><h2>Monitoring cadence</h2><label className="select-row"><span><strong>Dashboard visible</strong><small>Faster feedback while you are looking</small></span><select value={draft.foregroundIntervalMs} onChange={(event) => update("foregroundIntervalMs", Number(event.target.value))}><option value={500}>0.5 seconds</option><option value={1000}>1 second</option><option value={2000}>2 seconds</option><option value={5000}>5 seconds</option></select></label><label className="select-row"><span><strong>Dashboard hidden</strong><small>Lower-overhead background cadence</small></span><select value={draft.backgroundIntervalMs} onChange={(event) => update("backgroundIntervalMs", Number(event.target.value))}><option value={2000}>2 seconds</option><option value={5000}>5 seconds</option><option value={10000}>10 seconds</option><option value={30000}>30 seconds</option></select></label></section>
+        <section className="panel settings-section"><span className="eyebrow">Tray & Mini HUD</span><h2>Low-footprint surfaces</h2>
+          <Toggle checked={draft.ultraLightTrayMode ?? false} onChange={(value) => update("ultraLightTrayMode", value)} label="Ultra-Light Tray Mode" description="When the dashboard closes to tray, fully destroy the webview (frees the WebView2 processes). Monitoring, cleaner policy, and restoration keep running natively; Open dashboard recreates it." />
+          <Toggle checked={draft.miniHudEnabled ?? false} onChange={(value) => update("miniHudEnabled", value)} label="Show Mini HUD" description="Independent floating monitor sharing the native sampler — useful while the dashboard stays hidden." />
+          <Toggle checked={draft.miniHudAlwaysOnTop ?? true} onChange={(value) => update("miniHudAlwaysOnTop", value)} label="Mini HUD always on top" description="Keep the mini monitor above other windows." />
+          <Toggle checked={draft.miniHudClickThrough ?? false} onChange={(value) => update("miniHudClickThrough", value)} label="Mini HUD click-through" description="Ignore pointer input so the HUD never steals clicks (reposition from the tray toggle instead)." />
+          <label className="select-row"><span><strong>Mini HUD layout</strong><small>Compact metrics shown</small></span>
+            <select value={draft.miniHudPreset ?? "compact"} onChange={(event) => update("miniHudPreset", event.target.value)}>
+              <option value="minimal">Minimal (CPU + FPS)</option>
+              <option value="compact">Compact (CPU · GPU · RAM · FPS)</option>
+              <option value="detailed">Detailed (+ frame time, P99, cleaner)</option>
+            </select>
+          </label>
+          <label className="select-row"><span><strong>Mini HUD opacity</strong><small>Visual transparency</small></span>
+            <select value={draft.miniHudOpacityPercent ?? 92} onChange={(event) => update("miniHudOpacityPercent", Number(event.target.value))}>
+              <option value={50}>50%</option>
+              <option value={70}>70%</option>
+              <option value={85}>85%</option>
+              <option value={92}>92%</option>
+              <option value={100}>100%</option>
+            </select>
+          </label>
+        </section>
         <section className="panel settings-section"><span className="eyebrow">Appearance</span><h2>Interface comfort</h2><Toggle checked={draft.reducedMotion} onChange={(value) => update("reducedMotion", value)} label="Reduced motion" description="Suppress non-essential transitions and ambient movement." /><Toggle checked={draft.compactDensity} onChange={(value) => update("compactDensity", value)} label="Compact density" description="Tighten cards and tables for information-dense windows." /></section>
         <section className="panel settings-section storage-section"><span className="eyebrow">Local-first privacy</span><h2>Settings storage</h2><div className="storage-path"><code>{envelope.path || "Resolving local application data path…"}</code></div><ul className="check-list"><li><span>✓</span> No account required</li><li><span>✓</span> No uploaded analytics</li><li><span>✓</span> Atomic local writes</li></ul></section>
       </div>
@@ -1578,6 +1820,7 @@ export default function App() {
       return (
         <IntelligencePage
           frame={frame}
+          history={history}
           onStartFpsCapture={startFpsCapture}
           onStopFpsCapture={stopFpsCapture}
         />

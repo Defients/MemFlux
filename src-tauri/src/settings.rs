@@ -4,7 +4,7 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-pub const SETTINGS_SCHEMA_VERSION: u32 = 4;
+pub const SETTINGS_SCHEMA_VERSION: u32 = 5;
 
 fn default_schema_version() -> u32 {
     SETTINGS_SCHEMA_VERSION
@@ -56,6 +56,14 @@ fn default_hud_detail_level() -> String {
 
 fn default_hud_refresh_interval() -> u64 {
     1_000
+}
+
+fn default_mini_hud_opacity() -> u32 {
+    92
+}
+
+fn default_mini_hud_preset() -> String {
+    "compact".into()
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -127,6 +135,27 @@ pub struct AppSettings {
     pub game_profiles: Vec<GameProfile>,
     #[serde(default)]
     pub onboarding_completed: bool,
+    /// V4.2: when enabled, hiding the dashboard destroys the main webview
+    /// entirely (frees the WebView2 processes); the tray keeps working and
+    /// "Open dashboard" recreates the window on demand.
+    #[serde(default)]
+    pub ultra_light_tray_mode: bool,
+    /// V4.2: independent floating mini monitor sharing the native sampler.
+    #[serde(default)]
+    pub mini_hud_enabled: bool,
+    #[serde(default = "default_true")]
+    pub mini_hud_always_on_top: bool,
+    #[serde(default)]
+    pub mini_hud_click_through: bool,
+    #[serde(default = "default_mini_hud_opacity")]
+    pub mini_hud_opacity_percent: u32,
+    #[serde(default)]
+    pub mini_hud_x: Option<i32>,
+    #[serde(default)]
+    pub mini_hud_y: Option<i32>,
+    /// "compact" | "detailed" | "minimal"
+    #[serde(default = "default_mini_hud_preset")]
+    pub mini_hud_preset: String,
 }
 
 impl Default for AppSettings {
@@ -165,6 +194,14 @@ impl Default for AppSettings {
             powershift_allow_on_battery: false,
             game_profiles: Vec::new(),
             onboarding_completed: false,
+            ultra_light_tray_mode: false,
+            mini_hud_enabled: false,
+            mini_hud_always_on_top: true,
+            mini_hud_click_through: false,
+            mini_hud_opacity_percent: default_mini_hud_opacity(),
+            mini_hud_x: None,
+            mini_hud_y: None,
+            mini_hud_preset: default_mini_hud_preset(),
         }
     }
 }
@@ -211,6 +248,13 @@ impl AppSettings {
         }
         self.game_profiles
             .retain(|p| !p.id.trim().is_empty() && !p.executable.is_empty());
+        self.mini_hud_opacity_percent = self.mini_hud_opacity_percent.clamp(40, 100);
+        if !matches!(
+            self.mini_hud_preset.as_str(),
+            "minimal" | "compact" | "detailed"
+        ) {
+            self.mini_hud_preset = default_mini_hud_preset();
+        }
         self
     }
 }

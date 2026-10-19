@@ -5,8 +5,10 @@ mod gamefocus;
 mod guardian;
 mod performance;
 mod powershift;
+mod proof;
 mod rewind;
 mod settings;
+mod stutter;
 mod telemetry;
 
 pub fn run() {

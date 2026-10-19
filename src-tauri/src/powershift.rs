@@ -229,15 +229,24 @@ pub fn apply_power_mode(
     )?;
 
     if let Err(apply_err) = platform::set_active_scheme_guid(&target.guid) {
-        let _ = journal.mark_mutation_failed(&pending.action_id, &apply_err);
+        // PowerSetActiveScheme returned a Win32 error: no mutation occurred.
+        let _ = journal.mark_failed_before_mutation(&pending.action_id, &apply_err);
         return Err(apply_err);
     }
 
     let verified_guid = match platform::get_active_scheme_guid() {
         Ok(g) => g,
         Err(verify_err) => {
-            let _ = journal.mark_mutation_failed(&pending.action_id, &verify_err);
-            return Err(verify_err);
+            // The mutation call succeeded; the OS state may have changed but the
+            // read-back failed. Keep the restoration obligation recoverable.
+            let _ = journal.mark_outcome_uncertain(
+                &pending.action_id,
+                None,
+                &format!("PowerSetActiveScheme succeeded but PowerGetActiveScheme verification failed: {verify_err}"),
+            );
+            return Err(format!(
+                "Power scheme change may have been applied but could not be verified; the change is journaled as outcome-uncertain and remains recoverable. {verify_err}"
+            ));
         }
     };
 
@@ -246,7 +255,7 @@ pub fn apply_power_mode(
             "PowerSetActiveScheme returned success, but post-change verification reported active GUID '{verified_guid}' instead of requested '{}'.",
             target.guid
         );
-        let _ = journal.mark_mutation_failed(&pending.action_id, &msg);
+        let _ = journal.mark_outcome_uncertain(&pending.action_id, Some(&verified_guid), &msg);
         return Err(msg);
     }
 
