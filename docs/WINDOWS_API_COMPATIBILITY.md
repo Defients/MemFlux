@@ -38,6 +38,12 @@ Capability reporting distinguishes confirmed supported, confirmed unsupported, u
 
 ## Authoritative references
 
+V4 read-only additions: GetSystemTimes supplies CPU counter deltas (kernel includes idle); overall CPU is unavailable on multi-group systems pending broader aggregation. Foreground exclusions use GetForegroundWindow → GetWindowThreadProcessId → OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION) → QueryFullProcessImageNameW, then recheck foreground ownership. Access failure or focus change returns unknown. Neither API path elevates or modifies the inspected process.
+
+- [GetSystemTimes and processor-group limitations](https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-getsystemtimes)
+- [GetWindowThreadProcessId](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-getwindowthreadprocessid)
+- [QueryFullProcessImageNameW](https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-queryfullprocessimagenamew)
+
 - [GlobalMemoryStatusEx](https://learn.microsoft.com/windows/win32/api/sysinfoapi/nf-sysinfoapi-globalmemorystatusex)
 - [GetPerformanceInfo](https://learn.microsoft.com/windows/win32/api/psapi/nf-psapi-getperformanceinfo)
 - [CreateMemoryResourceNotification](https://learn.microsoft.com/windows/win32/api/memoryapi/nf-memoryapi-creatememoryresourcenotification)

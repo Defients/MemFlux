@@ -5,6 +5,8 @@
 
 ## Core functionality recovery — V2.0
 
+V4 continuation: see `MEMFLUX_OMNIFLUX_V4_IMPLEMENTATION_PLAN.md` for current scope. Foreground exclusions now observe the actual executable with limited query rights and ownership recheck. CPU/RAM sidebar HUD and persisted visibility settings are implemented as the first read-only V4 slice. Earlier descriptions of foreground observation as absent are historical. Automatic native execution and independent monotonic cleaner scheduling remain incomplete.
+
 ### V3 P0 continuation — 2026-10-18
 
 The current repository is an existing Git worktree at baseline `10fd1a7`, synchronized with `origin/main` before these changes. The blank-workspace findings below describe the original Phase 0 audit, not current reality. The detailed current inventory and gates live in `MEMFLUX_PERFORMANCE_EVOLUTION_V3_PLAN.md`.

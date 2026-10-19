@@ -1,6 +1,7 @@
 mod action;
 mod cleaner;
 mod guardian;
+mod performance;
 mod settings;
 mod telemetry;
 

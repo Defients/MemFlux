@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased — OmniFlux V4 first slice
+
+- Added V4 repository audit, phase ledger, dependency gates and continuation checklist.
+- Added real GetSystemTimes CPU utilization with correct idle accounting, warm-up, invalid delta/reset handling and multi-group unavailable state.
+- Added CPU/RAM sidebar HUD without changing navigation widths; paused/stale metrics render unavailable. GPU/FPS/frame time remain explicitly absent.
+- Added persisted HUD visibility preference (settings schema 3); CPU collection suspends when hidden/disabled/monitor-paused.
+- Connected foreground executable lookup to cleaner exclusions using limited process-query rights and rechecking foreground ownership.
+- Added CPU arithmetic/live-native tests and HUD rendering/freshness tests. Native automatic execution, independent cleaner scheduling, GPU and FPS capture remain incomplete.
+- Verified 23 native tests, 4 frontend tests, strict lint/format, frontend build, native debug build and optimized no-bundle release build. Resource overhead and native visual QA remain unmeasured/unverified.
+
 ## Unreleased — Performance Evolution V3 P0 hardening
 
 ### Corrected

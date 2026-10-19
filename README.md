@@ -19,6 +19,8 @@ The current cleaner milestone is enabled only on the explicitly validated Window
 
 ## Monitoring foundation
 
+V4 adds a compact sidebar HUD with real CPU and existing RAM utilization, warm-up/stale states, a persisted show/hide preference, and keyboard-accessible compact disclosure. CPU is sampled with the native pipeline only when the HUD/dashboard is visible. GPU, FPS and frame time display unavailable; no capture engine is running. Foreground executable observation is now connected to cleaner exclusion evaluation using standard-user query rights.
+
 - Native `GlobalMemoryStatusEx` and `GetPerformanceInfo` collection.
 - Documented Windows low/high memory resource notifications.
 - PDH English counters for standby classes, free/zero pages, modified pages, and hard page reads.
@@ -37,7 +39,7 @@ The current cleaner milestone is enabled only on the explicitly validated Window
 
 ## Not implemented yet
 
-- Secure unattended automatic purge execution and foreground-process exclusion observation (policy and persistence are implemented; native automatic execution is not).
+- Secure unattended automatic purge execution, independent cleaner scheduling, and monotonic cooldown reconciliation (policy, foreground exclusion observation and persistence are implemented; native automatic execution is not).
 - Low-priority-only standby purge, pending independent native validation.
 - Timer-resolution changes.
 - Game overlays, PresentMon, performance sessions, and performance-improvement claims.
@@ -68,6 +70,8 @@ See [MEMFLUX_IMPLEMENTATION_PLAN.md](MEMFLUX_IMPLEMENTATION_PLAN.md) and [MEMFLU
 Monitoring runs as a standard user. Manual cleaning requests UAC only for a one-shot helper in the same executable. The helper accepts no arbitrary shell command or path, installs no service or driver, and returns only its native status through the process exit code. MemFlux uploads no analytics or system telemetry. See [docs/SECURITY.md](docs/SECURITY.md).
 
 ## Project maturity
+
+See [MEMFLUX_OMNIFLUX_V4_IMPLEMENTATION_PLAN.md](MEMFLUX_OMNIFLUX_V4_IMPLEMENTATION_PLAN.md) for the current incremental roadmap. The CPU/RAM HUD is an initial slice; GPU, FPS, trusted-counter comparison, resource profiling and visual QA remain required for the full HUD gate.
 
 P0 hardening alpha. Manual native purging is runtime-verified only on Windows 11 Home Insider Preview build 26340; other builds remain action-disabled until tested. Automatic policy is implemented but unattended authorization/execution is incomplete. Clearing cache is not a memory-leak fix and is not evidence of higher FPS or lower latency.
 

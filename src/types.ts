@@ -49,12 +49,14 @@ export interface GuardianDecision {
 }
 
 export interface TelemetryFrame {
+  cpuUtilization: Metric;
   snapshot: MemorySnapshot;
   guardian: GuardianDecision;
   cleanerDecision: string;
 }
 
 export interface AppSettings {
+  performanceHudEnabled: boolean;
   schemaVersion: number;
   guardianEnabled: boolean;
   closeToTray: boolean;

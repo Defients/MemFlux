@@ -32,6 +32,7 @@ fn action_id(timestamp: u64) -> String {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TelemetryFrame {
+    pub cpu_utilization: crate::telemetry::Metric,
     pub snapshot: MemorySnapshot,
     pub guardian: GuardianDecision,
     pub cleaner_decision: CleanerDecision,
@@ -524,6 +525,7 @@ fn spawn_sampler(app: tauri::AppHandle, state: Arc<AppState>) {
         .name("memflux-telemetry".into())
         .spawn(move || {
             let mut collector = PlatformCollector::new();
+            let mut cpu = crate::performance::CpuSensor::default();
             let mut guardian = GuardianEvaluator::new();
             let mut cleaner = CleanerPolicy::default();
             let mut last_cleaner_evaluation_ms = 0_u64;
@@ -557,6 +559,7 @@ fn spawn_sampler(app: tauri::AppHandle, state: Arc<AppState>) {
                     let snapshot = collector.collect(sequence, interval_ms);
                     let decision = guardian.evaluate(&snapshot, settings.guardian_enabled);
                     let mut frame = TelemetryFrame {
+                        cpu_utilization: cpu.collect(interval_ms, window_visible && settings.performance_hud_enabled),
                         snapshot,
                         guardian: decision,
                         cleaner_decision: state.cleaner_decision.read()
@@ -570,13 +573,14 @@ fn spawn_sampler(app: tauri::AppHandle, state: Arc<AppState>) {
                             .unwrap_or_else(|error| error.into_inner()).iter()
                             .filter(|record| record.native_request_succeeded)
                             .map(|record| record.timestamp_ms.saturating_add(record.duration_ms)));
+                        let foreground = if settings.cleaner_excluded_applications.is_empty() { None } else { crate::performance::foreground_executable() };
                         let cleaner_decision = cleaner.evaluate(
                             &settings,
                             CleanerInputs {
                                 now_ms,
                                 standby_bytes: frame.snapshot.standby_bytes.value,
                                 free_zero_bytes: frame.snapshot.free_zero_bytes.value,
-                                foreground_executable: None,
+                                foreground_executable: foreground.as_deref(),
                                 authorization_ready: false,
                             },
                         );
@@ -612,6 +616,7 @@ fn spawn_sampler(app: tauri::AppHandle, state: Arc<AppState>) {
                         Some(pressure_label(&frame.guardian.pressure)),
                     );
                 } else {
+                    cpu.collect(interval_ms, false);
                     guardian.reset();
                 }
 

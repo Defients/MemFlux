@@ -3,7 +3,7 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-pub const SETTINGS_SCHEMA_VERSION: u32 = 2;
+pub const SETTINGS_SCHEMA_VERSION: u32 = 3;
 
 fn default_schema_version() -> u32 {
     SETTINGS_SCHEMA_VERSION
@@ -48,6 +48,8 @@ fn default_maximum_purges_per_hour() -> u32 {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AppSettings {
+    #[serde(default = "default_true")]
+    pub performance_hud_enabled: bool,
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     #[serde(default = "default_true")]
@@ -85,6 +87,7 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            performance_hud_enabled: true,
             schema_version: SETTINGS_SCHEMA_VERSION,
             guardian_enabled: true,
             close_to_tray: true,
@@ -321,6 +324,7 @@ mod tests {
         let path = temp_settings_path("settings.json");
         let store = SettingsStore::new(path.clone());
         let expected = AppSettings {
+            performance_hud_enabled: false,
             reduced_motion: true,
             background_interval_ms: 7_000,
             ..Default::default()

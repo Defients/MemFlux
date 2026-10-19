@@ -61,6 +61,8 @@ Mock fixtures prove policy and UI behavior only. They are never evidence that a 
 
 ## V3 P0 continuation
 
+V4 first slice: 23 native tests pass, including idle-inclusive CPU arithmetic and a real two-sample GetSystemTimes read. Four frontend tests pass, covering existing formatting plus HUD measured values, absent GPU/capture, pause and old timestamps. Strict lint, formatting, TypeScript build and debug native build pass. Trusted-counter agreement, foreground transitions, compact visual/keyboard/DPI QA, multi-group native testing and renewed process-tree profiling remain unverified.
+
 21 Rust tests and 2 frontend tests pass; strict TypeScript production build, Rust format and all-target Clippy with warnings denied pass. Production result conversion now has a regression test for wait timeout, wait failure, missing exit code, cancellation and native privilege failure. Tests also cover exact exclusion matching, unknown foreground identity, cleaner pause/default disable, and cooldown restored from persisted manual actions.
 
 The current sandbox denies CIM queries; read-only registry inspection confirms build 26340.9750. Successful native purge evidence above belongs to the earlier baseline. This continuation has not repeated elevation or disruptive purge tests. P0 is still partial because session-helper authorization and automatic native execution are incomplete.

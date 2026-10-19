@@ -30,6 +30,8 @@
 
 ## Current evidence
 
+V4 first-slice overhead is not yet profiled. CPU collection adds GetActiveProcessorGroupCount/GetSystemTimes calls on visible, enabled HUD samples and no calls when hidden/disabled. Foreground executable queries run only when exclusions are configured. No GPU or FPS capture exists. These are implementation facts, not an overhead measurement or a performance improvement claim.
+
 Measured 2026-10-18 on Windows 11 Home Insider Preview build 26340 with 24 logical processors and the dashboard visible:
 
 | Build / scope | Duration | Normalized CPU | Private bytes | Working set | Result |

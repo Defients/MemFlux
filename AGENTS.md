@@ -38,3 +38,11 @@ This directory is a local mirror of the ChatGPT project “MemFlux”.
 - Keep automatic cleaner evaluation off by default and independent from Guardian. Never initiate UAC from a background threshold trigger; unattended execution requires an explicitly authorized, fixed-operation session helper with authenticated local IPC.
 - Do not begin mutable GameFocus or PowerShift controls until the P0 cleaner acceptance gate in `MEMFLUX_PERFORMANCE_EVOLUTION_V3_PLAN.md` passes.
 - New performance features must distinguish action execution, observed state change, workload performance change, and confidence. Preserve exact restoration state for every reversible change.
+
+### OmniFlux V4 continuity
+
+- Follow the phase ledger in `MEMFLUX_OMNIFLUX_V4_IMPLEMENTATION_PLAN.md`. Read-only sensors may progress alongside cleaner completion; privileged automatic execution still requires authenticated session-helper IPC.
+- CPU utilization is a delta of GetSystemTimes counters; kernel includes idle. Preserve warm-up/reset/zero-delta handling and the multi-processor-group unavailable state until group-aware implementation exists.
+- Foreground executable inspection grants no process-modification authority. Access failure or a focus transition during lookup must fail closed for exclusions.
+- GPU utilization, FPS and frame time remain unavailable until real attributed sources exist. Never use refresh rate as FPS, reciprocal average FPS as frame-time distribution, or MemFlux-local DXGI budgets as game VRAM usage.
+- Preserve 250/218/82 px sidebar widths. Sensor collection shares the native sampler; hidden/disabled HUD must not cause a dedicated capture pipeline.

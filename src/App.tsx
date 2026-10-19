@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import { useMemFlux } from "./hooks/useMemFlux";
+import { PerformanceHud } from "./components/PerformanceHud";
 import {
   availablePercent,
   formatBytes,
@@ -83,6 +84,7 @@ function AppShell({
   frame,
   paused,
   onPause,
+  hudEnabled,
   children
 }: {
   page: PageId;
@@ -90,6 +92,7 @@ function AppShell({
   frame: TelemetryFrame | null;
   paused: boolean;
   onPause: () => void;
+  hudEnabled: boolean;
   children: ReactNode;
 }) {
   return (
@@ -117,6 +120,7 @@ function AppShell({
           ))}
         </nav>
 
+        {hudEnabled && <PerformanceHud frame={frame} paused={paused} />}
         <div className="sidebar-footer">
           <div className="engine-status">
             <span className={`engine-orbit ${paused ? "is-paused" : ""}`}><Icon name="pulse" size={17} /></span>
@@ -419,6 +423,7 @@ function SettingsPage({ envelope, saving, onSave }: { envelope: SettingsEnvelope
       <PageTitle eyebrow="Settings" title="Quiet by default. Precise by choice." description="Tune monitoring behavior and presentation. Settings are validated by the native runtime and stored locally in a versioned file." side={<button className="button button-primary" disabled={!changed || saving} onClick={() => void submit()}>{saving ? "Saving…" : saved ? "Saved" : "Save changes"}</button>} />
       {envelope.warning && <div className="degraded-banner"><Icon name="info" /><span><strong>Safe defaults active</strong>{envelope.warning}</span></div>}
       <div className="settings-grid">
+        <section className="panel settings-section"><span className="eyebrow">Live telemetry</span><h2>Sidebar performance HUD</h2><Toggle checked={draft.performanceHudEnabled} onChange={(value) => update("performanceHudEnabled", value)} label="Show performance HUD" description="Real CPU and RAM at the monitoring cadence. CPU collection pauses when hidden or disabled. GPU and frame capture are not yet available." /></section>
         <section className="panel settings-section"><span className="eyebrow">Cleaner timing</span><h2>Evaluation limits</h2><label className="select-row"><span><strong>Policy polling interval</strong><small>Evaluation follows available monitoring samples</small></span><select value={draft.cleanerPollIntervalMs} onChange={(event) => update("cleanerPollIntervalMs", Number(event.target.value))}><option value={1000}>1 second</option><option value={5000}>5 seconds</option><option value={10000}>10 seconds</option><option value={30000}>30 seconds</option><option value={60000}>60 seconds</option></select></label><label className="select-row"><span><strong>Minimum intervention interval</strong><small>Cooldown also applies</small></span><select value={draft.cleanerMinimumIntervalMs} onChange={(event) => update("cleanerMinimumIntervalMs", Number(event.target.value))}><option value={60000}>1 minute</option><option value={300000}>5 minutes</option><option value={600000}>10 minutes</option></select></label></section>
         <section className="panel settings-section cleaner-settings"><span className="eyebrow">Standby cleaner</span><h2>Automatic threshold policy</h2><Toggle checked={draft.automaticCleaningEnabled} onChange={(value) => update("automaticCleaningEnabled", value)} label="Enable automatic evaluation" description="Opt in to standby plus Free & Zero threshold evaluation. Background triggers never open surprise UAC prompts." /><Toggle checked={draft.cleanerPaused} onChange={(value) => update("cleanerPaused", value)} label="Pause automatic cleaner" description="Pause cleaner policy independently while telemetry continues." /><label className="select-row"><span><strong>Standby threshold</strong><small>Both threshold conditions must be true</small></span><select value={draft.standbyThresholdBytes} onChange={(event) => update("standbyThresholdBytes", Number(event.target.value))}><option value={536870912}>512 MiB</option><option value={1073741824}>1 GiB</option><option value={2147483648}>2 GiB</option><option value={4294967296}>4 GiB</option></select></label><label className="select-row"><span><strong>Free & Zero threshold</strong><small>Not available physical memory</small></span><select value={draft.freeZeroThresholdBytes} onChange={(event) => update("freeZeroThresholdBytes", Number(event.target.value))}><option value={536870912}>512 MiB</option><option value={1073741824}>1 GiB</option><option value={2147483648}>2 GiB</option><option value={4294967296}>4 GiB</option></select></label><label className="select-row"><span><strong>Cooldown</strong><small>Minimum time after a completed purge</small></span><select value={draft.cleanerCooldownMs} onChange={(event) => update("cleanerCooldownMs", Number(event.target.value))}><option value={300000}>5 minutes</option><option value={600000}>10 minutes</option><option value={1800000}>30 minutes</option><option value={3600000}>1 hour</option></select></label><label className="select-row"><span><strong>Maximum frequency</strong><small>Completed purges per rolling hour</small></span><select value={draft.maximumPurgesPerHour} onChange={(event) => update("maximumPurgesPerHour", Number(event.target.value))}><option value={1}>1 per hour</option><option value={2}>2 per hour</option><option value={4}>4 per hour</option></select></label><label className="select-row exclusions-row"><span><strong>Excluded foreground apps</strong><small>Comma-separated executable names</small></span><input value={draft.cleanerExcludedApplications.join(", ")} onChange={(event) => update("cleanerExcludedApplications", event.target.value.split(",").map((value) => value.trim()).filter(Boolean))} placeholder="obs64.exe, game.exe" /></label><p className="settings-caveat">Policy configuration and safeguards are active foundations. Unattended native execution remains disabled until the explicitly authorized session helper is complete; manual purge remains available.</p></section>
         <section className="panel settings-section"><span className="eyebrow">Guardian & lifecycle</span><h2>Background behavior</h2><Toggle checked={draft.guardianEnabled} onChange={(value) => update("guardianEnabled", value)} label="Adaptive Guardian" description="Interpret memory pressure separately from manual cleaning." /><Toggle checked={draft.closeToTray} onChange={(value) => update("closeToTray", value)} label="Close to system tray" description="Keep the collector running when the dashboard closes." /></section>
@@ -457,7 +462,7 @@ export default function App() {
   }, [frame, page, history, settingsEnvelope, saving, saveSettings, paused, setPaused, runtime?.actionCapability, actionHistory, purging, purgeStandby]);
 
   return (
-    <AppShell page={page} onPage={setPage} frame={frame} paused={paused} onPause={() => void setPaused(!paused)}>
+    <AppShell page={page} onPage={setPage} frame={frame} paused={paused} onPause={() => void setPaused(!paused)} hudEnabled={settingsEnvelope?.settings.performanceHudEnabled ?? true}>
       {error && <ErrorBanner message={error} />}
       {content}
     </AppShell>

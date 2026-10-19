@@ -95,6 +95,23 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
 .nav-item small { display: block; color: var(--text-muted); font-size: 10.5px; }
 
 .sidebar-footer { margin-top: auto; padding: 14px 5px 0; border-top: 1px solid rgba(52, 45, 78, 0.66); }
+.performance-hud { margin: 14px 4px; padding: 12px; border: 1px solid var(--border-subtle); border-radius: 12px; background: rgba(8,7,18,.3); font-variant-numeric: tabular-nums; }
+.performance-hud summary { cursor: pointer; color: var(--text-muted); font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
+.hud-content { padding-top: 10px; }
+.hud-row { display: flex; justify-content: space-between; gap: 12px; margin: 7px 0; font-size: 10px; }
+.hud-row strong { font-weight: 600; }
+.hud-track { height: 3px; background: rgba(255,255,255,.06); border-radius: 2px; overflow: hidden; }
+.hud-track i { display: block; height: 100%; background: #a978ff; }
+.hud-gpu .hud-track i { background: #6377ff; }
+.hud-ram .hud-track i { background: #df83db; }
+.hud-caption { display: block; color: var(--text-muted); font-size: 8px; line-height: 1.5; overflow-wrap: anywhere; }
+.hud-compact-label { display: none; }
+@media (max-width: 940px) {
+  .performance-hud { position: relative; padding: 9px 4px; margin: 8px 0; }
+  .hud-expanded-label, .performance-hud .hud-content { display: none; }
+  .hud-compact-label { display: inline; }
+  .performance-hud[open]:focus-within .hud-content { display: block; position: fixed; left: 82px; bottom: 20px; width: 190px; padding: 14px; background: #171225; border: 1px solid var(--border-subtle); border-radius: 12px; z-index: 20; }
+}
 .engine-status { display: flex; align-items: center; gap: 10px; }
 .engine-orbit { display: grid; width: 34px; height: 34px; place-items: center; border: 1px solid rgba(119, 217, 180, 0.24); border-radius: 50%; background: rgba(119, 217, 180, 0.08); color: var(--status-success); box-shadow: 0 0 20px rgba(119, 217, 180, 0.08); }
 .engine-orbit.is-paused { border-color: rgba(240, 195, 108, 0.25); background: rgba(240, 195, 108, 0.08); color: var(--status-warning); }

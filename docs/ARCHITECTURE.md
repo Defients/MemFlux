@@ -26,6 +26,9 @@ Manual command → serialize → pre-snapshot → fixed UAC helper → NTSTATUS 
 
 ## Modules
 
+- `src-tauri/src/performance.rs`: CPU counter delta validation and standard-user foreground executable observation. CPU metric travels in the shared TelemetryFrame; no separate HUD collector thread.
+- `src/components/PerformanceHud.tsx`: CPU/RAM sidebar presentation, explicit missing GPU/capture values, stale detection and compact disclosure. Schema-3 settings persist visibility.
+
 - `src-tauri/src/telemetry`: cross-platform contract and Windows adapter. Optional counters fail independently.
 - `src-tauri/src/action.rs`: build capability, exact privilege enablement, native call, and fixed one-shot elevated helper.
 - `src-tauri/src/guardian.rs`: deterministic pressure classifier, hysteresis, explanations, and tests.
