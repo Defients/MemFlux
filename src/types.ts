@@ -46,7 +46,10 @@ export type StutterSeverity = "dropped_present" | "mild" | "moderate" | "severe"
 
 export interface StutterEvent {
   id: string;
-  atMs: number;
+  atMs: number | null;
+  observedMs: number;
+  providerQpc: string | null;
+  providerSeconds: number | null;
   frameTimeMs: number;
   baselineP95Ms: number;
   ratio: number;
@@ -68,6 +71,8 @@ export interface FpsCaptureStatus {
   providerName: string;
   targetPid: number | null;
   targetExecutable: string | null;
+  targetCreationStamp: string | null;
+  captureSessionId: string | null;
   fps: Metric;
   frameTimeMs: Metric;
   frameTimeP99Ms: number | null;
@@ -92,6 +97,7 @@ export interface MetricComparison {
 }
 
 export interface ProofReport {
+  hypothesisId: string | null;
   active: boolean;
   phase: ProofPhase | null;
   baselineSamples: number;
@@ -329,6 +335,7 @@ export interface CoordinatorSnapshot {
 }
 
 export interface TelemetryFrame {
+  atlas: AtlasReport;
   cpuUtilization: Metric;
   gpuTelemetry?: GpuTelemetry;
   fpsCapture?: FpsCaptureStatus;
@@ -461,3 +468,61 @@ export interface ActionRecord {
 }
 
 export type PageId = "overview" | "memory" | "performance" | "intelligence" | "settings";
+
+export interface SensorReading {
+  sensorId: string;
+  category: string;
+  value: number | null;
+  unit: string;
+  status: "available" | "warming_up" | "unavailable" | "stale" | "error";
+  source: string;
+  targetIdentity: string;
+  deviceIdentity: string | null;
+  eventTimestampMs: number | null;
+  observationTimestampMs: number;
+  samplingIntervalMs: number;
+  uncertaintyMs: number;
+  capabilityLevel: string;
+  limitation: string;
+}
+export interface AtlasFinding {
+  id: string;
+  title: string;
+  explanation: string;
+  confidence: "moderate" | "weak" | "inconclusive" | "insufficient_data";
+  evidence: SensorReading[];
+  missingEvidence: string[];
+  contradictoryEvidence: string[];
+  recommendedTest: string;
+}
+export interface AtlasIncident {
+  id: string;
+  sessionId: string;
+  targetIdentity: string;
+  provider: string;
+  providerQpc: string | null;
+  providerSeconds: number | null;
+  eventTimestampMs: number | null;
+  observationTimestampMs: number;
+  frameTimeMs: number;
+  severity: string;
+  windowStartMs: number | null;
+  windowEndMs: number | null;
+  contextSamples: number;
+  contextState: string;
+  finding: AtlasFinding;
+}
+export interface AtlasReport {
+  timestampMs: number;
+  summary: string;
+  findings: AtlasFinding[];
+  sensors: SensorReading[];
+  domains: Array<{ domain: string; status: string; detail: string }>;
+  incidents: AtlasIncident[];
+  retainedSamples: number;
+  evaluationMicros: number;
+}
+
+// Chart history omits Atlas's bounded incident payload; retaining it per tick
+// would multiply the same incident evidence across ninety frontend frames.
+export type TelemetryHistoryFrame = Omit<TelemetryFrame, "atlas">;

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import type { AppSettings, TelemetryFrame } from "../types";
+import { freshValue, frameFresh } from "../lib/freshness";
 
 export function PerformanceHud({
   frame,
@@ -11,6 +12,7 @@ export function PerformanceHud({
   settings?: Partial<AppSettings> | undefined;
 }) {
   const [now, setNow] = useState(Date.now());
+  const currentTime = Math.max(now, Date.now());
   useEffect(() => {
     const timer = window.setInterval(() => {
       if (!document.hidden) setNow(Date.now());
@@ -18,20 +20,17 @@ export function PerformanceHud({
     return () => window.clearInterval(timer);
   }, []);
 
-  const stale =
-    paused ||
-    !frame ||
-    now - frame.snapshot.timestampMs > Math.max(5000, frame.snapshot.sampleIntervalMs * 3);
+  const stale = !frameFresh(frame, paused, currentTime);
 
-  const cpu = stale ? null : frame?.cpuUtilization.value ?? null;
+  const cpu = stale ? null : freshValue(frame?.cpuUtilization, currentTime);
   const gpuMetric = frame?.gpuTelemetry?.utilization ?? null;
-  const gpu = stale ? null : gpuMetric?.value ?? null;
-  const ram = stale ? null : frame?.snapshot.physicalLoadPercent.value ?? null;
+  const gpu = stale ? null : freshValue(gpuMetric, currentTime);
+  const ram = stale ? null : freshValue(frame?.snapshot.physicalLoadPercent, currentTime);
 
   const fpsMetric = frame?.fpsCapture?.fps ?? null;
   const frameTimeMetric = frame?.fpsCapture?.frameTimeMs ?? null;
-  const fpsVal = !stale && fpsMetric?.status === "available" ? fpsMetric.value : null;
-  const frameMsVal = !stale && frameTimeMetric?.status === "available" ? frameTimeMetric.value : null;
+  const fpsVal = stale ? null : freshValue(fpsMetric, currentTime);
+  const frameMsVal = stale ? null : freshValue(frameTimeMetric, currentTime);
 
   const showCpu = settings?.hudShowCpu ?? true;
   const showGpu = settings?.hudShowGpu ?? true;

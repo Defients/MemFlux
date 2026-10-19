@@ -39,3 +39,15 @@ Authenticated Named Pipe Session Helper → NtSetSystemInformation(80, 4) → 75
 - `src-tauri/src/guardian.rs`: diagnostic pressure classifier with 3-sample hysteresis, independent of cleaner execution.
 - `src-tauri/src/settings.rs`: schema-v4 validated settings with atomic `MoveFileExW` replacement.
 - `src-tauri/src/app.rs`: Tauri commands, state management, tray lifecycle, single-instance policy, and background threads.
+
+## Bottleneck Atlas first slice
+
+`atlas.rs` runs on `memflux-telemetry`, consumes the existing MemorySnapshot/CPU/GPU/PresentMon status, and attaches an AtlasReport to the cached TelemetryFrame. It adds no collector thread, GPU query, ETW trace or privileged authority. The engine retains 90 normalized ticks, 64 incident summaries and 128 deduplication identifiers. React chart history omits Atlas payloads rather than retaining the same incident evidence in each chart point.
+
+Each normalized reading carries status, nullable value, source, system/device attribution, sample/event and observation timestamps, cadence, coarse uncertainty and limitations. Aggregate GPU/CPU utilization never produces a causal finding. The memory heuristic requires three samples over at least two seconds with <10% physical headroom, >=85% commit and >=20 page reads/s; recovery/missing evidence reduces confidence. These are investigation heuristics, not calibrated probabilities.
+
+Stutter incidents carry capture-session ID and PID plus exact process-creation stamp (serialized as a decimal string), provider raw QPC/relative time, event/arrival separation, a +/-3s surrounding sensor window and missing/contradictory evidence. Only mapped event timestamps can correlate; the first observed nonzero swapchain is selected explicitly. QPC/UTC anchors reject >2ms acquisition spans and mappings reject >100ms wall-clock drift. End-to-end gameplay precision remains unverified. Frame freshness uses mapped provider event age; buffered CSV receipt cannot refresh old FPS.
+
+Atlas can start a hypothesis-linked Proof baseline. It cannot apply a cleaner, GameFocus or power intervention. Existing Rewind controls remain in Performance Control; automatic outcome attachment/restoration recommendations and durable per-game learning are not implemented. Final Proof reports survive dashboard recreation within the current native process, not application restart.
+
+Provider schema references: [PresentMon console options](https://github.com/GameTechDev/PresentMon/blob/main/README-ConsoleApplication.md), [upstream v1 CSV raw QPCTime field](https://github.com/GameTechDev/PresentMon/blob/main/PresentMon/CsvOutput.cpp). These establish schema intent, not qualification of a locally installed provider.

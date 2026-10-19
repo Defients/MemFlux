@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "MemFlux",
-  "version": "0.2.0",
+  "version": "1.0.0",
   "identifier": "com.cosmotech.memflux",
   "build": {
     "beforeDevCommand": "npm run dev",

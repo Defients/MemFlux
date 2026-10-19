@@ -32,3 +32,26 @@ npm run tauri build
 - **Frontend (`format.test.ts`, `PerformanceHud.test.tsx`):**
   - Byte/percentage/rate formatting without fabricating unavailable values.
   - Live HUD rendering of CPU, GPU, RAM, absent FPS/frame time (`—`), paused/stale detection, and per-metric HUD customization toggles.
+
+## Atlas regression and qualification protocol
+
+Read-only/nonmutating suite used for Atlas:
+
+```powershell
+cargo test --manifest-path src-tauri/Cargo.toml -- --skip windows_power_schemes_enumerate_and_round_trip_restore_with_rewind --nocapture
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+npm test
+npm run build
+cargo build --manifest-path src-tauri/Cargo.toml --release
+```
+
+The existing PowerShift round-trip test changes the actual system scheme and is deliberately excluded from this Atlas run. Running the repository's unfiltered suite still includes it. No new elevated purge was exercised; the helper round-trip uses a mock fixed-operation callback returning zero, which is transport evidence only, not native NTSTATUS evidence.
+
+Atlas replay covers joint sustained pressure, healthy cache/high CPU/GPU without a bottleneck claim, stale/missing/nonfinite/future samples, clock reset/interruption, invalid physical headroom, recovery contradictions, event-vs-arrival context, PID creation/session identity, unavailable event mapping, bounded retention and payload size. Native tests cover cancellation completion on pending accept/read/write, shutdown flag and deadline, event/buffer reuse and a 75ms delayed reader. Read-only live integration passes the existing Windows CPU/WDDM/memory sources through the actual Atlas engine without starting capture. Frontend tests cover evidence/incident/Proof linkage, stale/paused surfaces, per-source frame freshness, new IPC frames between clock ticks and field-specific HUD close.
+
+Synthetic browser layout QA is separate from native WebView2 integration and gameplay. Full Tauri window/DPI/keyboard/tray/Mini HUD interaction, real PresentMon QPC capture, OBS/thermal/storage/VRAM providers and seven-mode profiling remain qualification work.
+
+Current Atlas results: **68 Rust tests passed** (one existing power-mutating test excluded), **11 frontend tests passed**, strict Clippy and format passed, frontend production build passed. Optimized filtered replay passed. Edge layout fixture checked at the default and 900px viewports, simple/advanced disclosure verified; temporary fixture removed. Full Windows native UI integration and provider gameplay timing remain unverified.
+
+Final optimized executable build passed after the last source/frontend changes: `src-tauri/target/release/memflux.exe`, 3,860,992 bytes; SHA-256 `4E3A4C5DB55CB71CFFA734A14B3C24767ED828FAD870D3B5E156CB1952AC527E`. Command: `cargo build --manifest-path src-tauri/Cargo.toml --release` (final compilation 1m 56s). The executable was compiled, not launched for a new native purge or power mutation. Installer bundles/signing and remote CI were not rerun.

@@ -1,4 +1,5 @@
 mod action;
+mod atlas;
 mod cleaner;
 mod coordinator;
 mod gamefocus;

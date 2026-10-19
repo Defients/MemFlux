@@ -36,7 +36,10 @@ pub enum StutterSeverity {
 #[serde(rename_all = "camelCase")]
 pub struct StutterEvent {
     pub id: String,
-    pub at_ms: u64,
+    pub at_ms: Option<u64>,
+    pub observed_ms: u64,
+    pub provider_qpc: Option<String>,
+    pub provider_seconds: Option<f64>,
     pub frame_time_ms: f64,
     pub baseline_p95_ms: f64,
     pub ratio: f64,
@@ -58,6 +61,8 @@ pub struct StutterSummary {
 pub struct StutterDetector {
     /// Recent non-anomalous frame times used as the live baseline.
     baseline: VecDeque<f64>,
+    sorted_baseline: Vec<f64>,
+    last_event_ms: Option<u64>,
     events: VecDeque<StutterEvent>,
     frames_seen: u64,
     event_seq: u64,
@@ -73,6 +78,8 @@ impl StutterDetector {
     pub fn new() -> Self {
         Self {
             baseline: VecDeque::with_capacity(BASELINE_WINDOW),
+            sorted_baseline: Vec::with_capacity(BASELINE_WINDOW),
+            last_event_ms: None,
             events: VecDeque::new(),
             frames_seen: 0,
             event_seq: 0,
@@ -83,15 +90,27 @@ impl StutterDetector {
         if self.baseline.len() < MIN_BASELINE_FRAMES {
             return None;
         }
-        let mut sorted: Vec<f64> = self.baseline.iter().cloned().collect();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let idx = ((sorted.len() as f64 * 0.95).floor() as usize).min(sorted.len() - 1);
-        Some(sorted[idx])
+        let idx = ((self.sorted_baseline.len() as f64 * 0.95).floor() as usize)
+            .min(self.sorted_baseline.len() - 1);
+        Some(self.sorted_baseline[idx])
     }
 
     /// Feed one presented frame. Emits an event when the frame is anomalous
     /// against the live baseline; normal frames extend the baseline.
-    pub fn observe(&mut self, frame: &PresentedFrame, now_ms: u64) -> Option<StutterEvent> {
+    pub fn observe(&mut self, frame: &PresentedFrame, _now_ms: u64) -> Option<StutterEvent> {
+        if !frame.ms_between_presents.is_finite() || frame.ms_between_presents <= 0.0 {
+            return None;
+        }
+        if let (Some(previous), Some(next)) = (self.last_event_ms, frame.event_ms) {
+            if next < previous {
+                return None;
+            }
+            if next - previous > 2_000 {
+                self.baseline.clear();
+                self.sorted_baseline.clear();
+            }
+        }
+        self.last_event_ms = frame.event_ms;
         self.frames_seen += 1;
         let ms = frame.ms_between_presents;
         let baseline = match self.baseline_p95() {
@@ -122,13 +141,16 @@ impl StutterDetector {
         };
         let event = StutterEvent {
             id: format!("stutter-{}-{}", frame.received_ms, self.event_seq),
-            at_ms: frame.received_ms.max(now_ms),
+            at_ms: frame.event_ms,
+            observed_ms: frame.received_ms,
+            provider_qpc: frame.provider_qpc.map(|qpc| qpc.to_string()),
+            provider_seconds: frame.provider_seconds,
             frame_time_ms: ms,
             baseline_p95_ms: baseline,
             ratio,
             dropped: frame.dropped,
             severity,
-            note: "Correlated frame-time anomaly; see matching CPU/GPU/memory telemetry — correlation is not causation.".into(),
+            note: if frame.event_ms.is_some() { "Provider QPC event mapped using a bracketed UTC anchor; >100ms wall-clock drift rejects mapping. End-to-end precision is not gameplay-qualified. Resource samples remain coarse context; correlation is not causation." } else { "Event time mapping unavailable; CSV receipt time cannot support resource correlation." }.into(),
         };
         if self.events.len() >= EVENT_LIMIT {
             self.events.pop_front();
@@ -140,10 +162,18 @@ impl StutterDetector {
     }
 
     fn push_baseline(&mut self, ms: f64) {
-        if self.baseline.len() >= BASELINE_WINDOW {
-            self.baseline.pop_front();
+        if self.baseline.len() >= BASELINE_WINDOW
+            && let Some(old) = self.baseline.pop_front()
+        {
+            let index = self
+                .sorted_baseline
+                .binary_search_by(|v| v.total_cmp(&old))
+                .expect("baseline member");
+            self.sorted_baseline.remove(index);
         }
         self.baseline.push_back(ms);
+        let index = self.sorted_baseline.partition_point(|v| *v < ms);
+        self.sorted_baseline.insert(index, ms);
     }
 
     pub fn recent_events(&self, limit: usize) -> Vec<StutterEvent> {
@@ -160,7 +190,10 @@ impl StutterDetector {
         let recent: Vec<&StutterEvent> = self
             .events
             .iter()
-            .filter(|e| now_ms.saturating_sub(e.at_ms) <= 60_000)
+            .filter(|e| {
+                e.at_ms
+                    .is_some_and(|at| at <= now_ms && now_ms - at <= 60_000)
+            })
             .collect();
         StutterSummary {
             events_last_minute: recent.len() as u32,
@@ -180,6 +213,10 @@ mod tests {
             ms_between_presents: ms,
             dropped,
             received_ms: received,
+            event_ms: Some(received),
+            provider_qpc: None,
+            provider_seconds: None,
+            swapchain: 1,
             until_displayed_ms: None,
         }
     }
@@ -193,6 +230,29 @@ mod tests {
         // Even a huge frame during warm-up is not flagged (baseline building).
         let mut fresh = StutterDetector::new();
         assert!(fresh.observe(&frame(120.0, false, 1), 1).is_none());
+    }
+
+    #[test]
+    fn delayed_arrival_missing_mapping_and_capture_gaps_are_honest() {
+        let mut detector = StutterDetector::new();
+        for i in 0..100 {
+            detector.observe(&frame(16.6, false, i * 16), i * 16);
+        }
+        let mut delayed = frame(100.0, false, 10_000);
+        delayed.event_ms = Some(1700);
+        let event = detector.observe(&delayed, 10_001).unwrap();
+        assert_eq!(event.at_ms, Some(1700));
+        assert_eq!(event.observed_ms, 10_000);
+        delayed.event_ms = None;
+        let event = detector.observe(&delayed, 10_001).unwrap();
+        assert_eq!(event.at_ms, None);
+        assert!(event.note.contains("unavailable"));
+        detector.observe(&frame(16.6, false, 11_000), 11_000);
+        assert!(
+            detector
+                .observe(&frame(100.0, false, 20_000), 20_000)
+                .is_none()
+        );
     }
 
     #[test]

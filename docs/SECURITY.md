@@ -24,3 +24,13 @@ MemFlux monitors local Windows memory, CPU, GPU, and power state, performs privi
 
 - **Code signing:** Build artifacts produced without a signing certificate are explicitly labeled unsigned development/beta artifacts and will trigger Windows SmartScreen prompts until signed with a trusted publisher certificate.
 - **Windows build allowlist:** Private memory-list purging (`NtSetSystemInformation` class 80, command 4) remains gated behind `SUPPORTED_BUILDS` (`[26340]`) until controlled runtime qualification is recorded on additional target Windows 10/11 builds.
+
+## Atlas integrity boundary (2026-10-19)
+
+Atlas is read-only. It cannot request UAC, change power/process state or bypass cleaner eligibility. The existing build allowlist and fixed-operation authenticated helper protocol remain unchanged. Synthetic replay exists only in tests; no replay values feed production telemetry. No new network connection, vendor driver or OBS credential storage was added.
+
+Overlapped pipe timeout/cancellation requests CancelIoEx then drains GetOverlappedResult completion before buffer/event/OVERLAPPED storage can be released. Drain completion may exceed the nominal request deadline; cancellation alone is never treated as native action completion. Events are reset before reuse. After writing a reply, the helper waits for the one-request client connection to close (bounded cancellable read), because DisconnectNamedPipe discards unread data. No second operation is dispatched on that connection and no unbounded FlushFileBuffers was added.
+
+Whole-settings UI writes compare an expected snapshot while holding the control lock through atomic persistence and memory application; stale writes fail. Native Mini HUD toggles/position/close update the current snapshot under the same lock. HUD position is independently owned and preserved during UI saves.
+
+Native contract references: [CancelIoEx completion/lifetime](https://learn.microsoft.com/en-us/windows/win32/api/ioapiset/nf-ioapiset-cancelioex), [DisconnectNamedPipe unread-data behavior](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-disconnectnamedpipe).

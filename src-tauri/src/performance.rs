@@ -71,6 +71,8 @@ pub struct FpsCaptureStatus {
     pub provider_name: String,
     pub target_pid: Option<u32>,
     pub target_executable: Option<String>,
+    pub target_creation_stamp: Option<String>,
+    pub capture_session_id: Option<String>,
     pub fps: Metric,
     pub frame_time_ms: Metric,
     pub frame_time_p99_ms: Option<f64>,
@@ -285,6 +287,10 @@ pub struct PresentedFrame {
     pub ms_between_presents: f64,
     pub dropped: bool,
     pub received_ms: u64,
+    pub event_ms: Option<u64>,
+    pub provider_qpc: Option<u64>,
+    pub provider_seconds: Option<f64>,
+    pub swapchain: u64,
     pub until_displayed_ms: Option<f64>,
 }
 
@@ -300,12 +306,51 @@ pub struct PresentMonCapabilities {
     pub supports_no_top: bool,
     pub supports_no_console_stats: bool,
     pub supports_terminate_on_proc_exit: bool,
+    pub supports_qpc_time: bool,
+    pub supports_v1_metrics: bool,
     pub banner: Option<String>,
 }
 
 const PRESENTMON_FRAME_RING_LIMIT: usize = 4096;
 const PRESENTMON_PROBE_BUDGET_MS: u64 = 3_000;
 const PRESENTMON_GRACEFUL_STOP_MS: u64 = 2_500;
+
+/// One QPC/UTC anchor per capture. Relative provider seconds have no known
+/// origin and are never aligned using the arrival of the first CSV record.
+struct FrameClock {
+    qpc: u64,
+    frequency: u64,
+    epoch_ms: u64,
+    started: std::time::Instant,
+}
+
+impl FrameClock {
+    fn new() -> Option<Self> {
+        let (qpc, frequency, epoch_ms) = platform::qpc_anchor()?;
+        Some(Self {
+            qpc,
+            frequency,
+            epoch_ms,
+            started: std::time::Instant::now(),
+        })
+    }
+
+    fn map(&self, event_qpc: u64, arrival_ms: u64, elapsed_ms: u64) -> Option<u64> {
+        if self.frequency == 0
+            || event_qpc == 0
+            || self
+                .epoch_ms
+                .saturating_add(elapsed_ms)
+                .abs_diff(arrival_ms)
+                > 100
+        {
+            return None; // wall-clock discontinuity: no cross-source correlation
+        }
+        let delta = (event_qpc as i128 - self.qpc as i128) * 1000 / self.frequency as i128;
+        let event_ms = u64::try_from(self.epoch_ms as i128 + delta).ok()?;
+        (event_ms <= arrival_ms.saturating_add(2)).then_some(event_ms)
+    }
+}
 
 struct PresentMonRollingWindow {
     frames: std::collections::VecDeque<PresentedFrame>,
@@ -314,6 +359,7 @@ struct PresentMonRollingWindow {
     columns: Option<std::collections::HashMap<String, usize>>,
     /// Stutter Detective online detector over the same verified frames.
     detector: crate::stutter::StutterDetector,
+    selected_swapchain: Option<u64>,
 }
 
 impl PresentMonRollingWindow {
@@ -323,6 +369,7 @@ impl PresentMonRollingWindow {
             last_sample_timestamp_ms: 0,
             columns: None,
             detector: crate::stutter::StutterDetector::new(),
+            selected_swapchain: None,
         }
     }
 }
@@ -402,6 +449,19 @@ fn parse_presentmon_frame(
         ms_between_presents: ms,
         dropped,
         received_ms: now_ms,
+        event_ms: None,
+        provider_qpc: csv_field(columns, &fields, "qpctime").and_then(|v| v.parse().ok()),
+        provider_seconds: csv_field(columns, &fields, "timeinseconds")
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.0),
+        swapchain: u64::from_str_radix(
+            csv_field(columns, &fields, "swapchainaddress")?
+                .trim_start_matches("0x")
+                .trim_start_matches("0X"),
+            16,
+        )
+        .ok()
+        .filter(|v| *v != 0)?,
         until_displayed_ms,
     })
 }
@@ -469,6 +529,10 @@ fn probe_presentmon(binary: &std::path::Path) -> Result<PresentMonCapabilities, 
         supports_no_top: has_flag("no_top"),
         supports_no_console_stats: has_flag("no_console_stats"),
         supports_terminate_on_proc_exit: has_flag("terminate_on_proc_exit"),
+        supports_qpc_time: lower
+            .split_whitespace()
+            .any(|token| token == "--qpc_time" || token == "-qpc_time"),
+        supports_v1_metrics: has_flag("v1_metrics"),
         banner,
     })
 }
@@ -518,24 +582,6 @@ impl PresentMonController {
         }
     }
 
-    /// Recent frame samples (for Stutter Detective correlation). Bounded copy
-    /// of the newest `limit` frames.
-    #[cfg(test)]
-    pub fn recent_frames(&self, limit: usize) -> Vec<PresentedFrame> {
-        let guard = self
-            .rolling
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        guard
-            .frames
-            .iter()
-            .rev()
-            .take(limit)
-            .rev()
-            .cloned()
-            .collect()
-    }
-
     pub fn start_capture(
         &mut self,
         pid: u32,
@@ -582,20 +628,26 @@ impl PresentMonController {
             );
         }
         args.push("--output_stdout".into());
+        if capabilities.supports_v1_metrics {
+            args.push("--v1_metrics".into());
+        }
+        if capabilities.supports_qpc_time {
+            args.push("--qpc_time".into());
+        }
         if capabilities.supports_no_top {
             args.push("--no_top".into());
         } else if capabilities.supports_no_console_stats {
             args.push("--no_console_stats".into());
         }
         // Unique session name; never terminate another session's trace.
+        let suffix = SESSION_TAG.fetch_add(1, Ordering::Relaxed);
+        let name = format!("MemFluxMF{}_{pid}_{identity}_{suffix}", std::process::id());
         let session_name = if capabilities.supports_session_name {
-            let suffix = SESSION_TAG.fetch_add(1, Ordering::Relaxed);
-            let name = format!("MemFluxMF{}_{pid}", suffix);
             args.push("--session_name".into());
             args.push(name.clone());
             Some(name)
         } else {
-            None
+            Some(name)
         };
         if capabilities.supports_terminate_on_proc_exit {
             args.push("--terminate_on_proc_exit".into());
@@ -620,10 +672,12 @@ impl PresentMonController {
             .stdout
             .take()
             .ok_or_else(|| "PresentMon stdout pipe unavailable.".to_string())?;
-        if let Ok(mut guard) = self.rolling.lock() {
-            *guard = PresentMonRollingWindow::new();
-        }
+        self.rolling = Arc::new(Mutex::new(PresentMonRollingWindow::new()));
         let rolling = self.rolling.clone();
+        let clock = capabilities
+            .supports_qpc_time
+            .then(FrameClock::new)
+            .flatten();
 
         std::thread::Builder::new()
             .name("memflux-presentmon-reader".into())
@@ -653,7 +707,20 @@ impl PresentMonController {
                         continue;
                     };
                     let now = timestamp_ms();
-                    if let Some(frame) = parse_presentmon_frame(&line, &columns, pid, now) {
+                    if let Some(mut frame) = parse_presentmon_frame(&line, &columns, pid, now) {
+                        frame.event_ms = clock.as_ref().and_then(|clock| {
+                            clock.map(
+                                frame.provider_qpc?,
+                                now,
+                                clock.started.elapsed().as_millis() as u64,
+                            )
+                        });
+                        // One explicitly selected swapchain. Do not mix independent
+                        // presentation streams into one frame distribution/baseline.
+                        let selected = guard.selected_swapchain.get_or_insert(frame.swapchain);
+                        if *selected != frame.swapchain {
+                            continue;
+                        }
                         // Stutter Detective evaluates every verified frame.
                         let _ = guard.detector.observe(&frame, now);
                         if guard.frames.len() >= PRESENTMON_FRAME_RING_LIMIT {
@@ -791,7 +858,14 @@ impl PresentMonController {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
             (
-                guard.frames.iter().cloned().collect::<Vec<_>>(),
+                guard
+                    .frames
+                    .iter()
+                    .rev()
+                    .take(240)
+                    .rev()
+                    .copied()
+                    .collect::<Vec<_>>(),
                 guard.last_sample_timestamp_ms,
                 guard.detector.recent_events(24),
                 guard.detector.summary(now),
@@ -799,7 +873,8 @@ impl PresentMonController {
         };
         let provider_label = self.provider_label();
 
-        if frames.is_empty() || now.saturating_sub(last_ts) > 3_500 {
+        let mapped_latest = frames.last().and_then(|f| f.event_ms);
+        if frames.is_empty() || mapped_latest.is_none_or(|at| at > now || now - at > 3_500) {
             let status = if last_ts == 0 {
                 MetricStatus::WarmingUp
             } else {
@@ -807,8 +882,10 @@ impl PresentMonController {
             };
             let detail = if last_ts == 0 {
                 "Waiting for presented frames from target process."
+            } else if mapped_latest.is_none() {
+                "Provider event-time mapping unavailable. Raw intervals retained; current FPS freshness unverified."
             } else {
-                "Frame stream is stale (no recent presents observed)."
+                "Provider frame events are stale; recent CSV arrival does not make old frames current."
             };
             return FpsCaptureStatus {
                 active: true,
@@ -816,6 +893,8 @@ impl PresentMonController {
                 provider_name: provider_label.clone(),
                 target_pid: Some(pid),
                 target_executable: self.target_executable.clone(),
+                target_creation_stamp: self.target_identity.map(|stamp| stamp.to_string()),
+                capture_session_id: self.session_name.clone(),
                 fps: Metric::missing(
                     "fps",
                     "fps",
@@ -845,6 +924,7 @@ impl PresentMonController {
             .iter()
             .rev()
             .take(240)
+            .filter(|f| f.event_ms.is_some_and(|at| at <= now && now - at <= 3_500))
             .map(|f| f.ms_between_presents)
             .collect();
         let mean_ms = display.iter().sum::<f64>() / display.len() as f64;
@@ -861,12 +941,14 @@ impl PresentMonController {
             provider_name: provider_label,
             target_pid: Some(pid),
             target_executable: self.target_executable.clone(),
+            target_creation_stamp: self.target_identity.map(|stamp| stamp.to_string()),
+            capture_session_id: self.session_name.clone(),
             fps: Metric::available(
                 "fps",
                 fps_val,
                 "fps",
                 "PresentMon: 1000 / mean(MsBetweenPresents)",
-                now,
+                mapped_latest.unwrap_or(last_ts),
                 interval,
             ),
             frame_time_ms: Metric::available(
@@ -874,14 +956,14 @@ impl PresentMonController {
                 mean_ms,
                 "ms",
                 "PresentMon: mean(MsBetweenPresents)",
-                now,
+                mapped_latest.unwrap_or(last_ts),
                 interval,
             ),
             frame_time_p99_ms: Some(p99_ms),
             recent_stutters: stutters,
             stutter_summary: Some(stutter_summary),
             status_detail: format!(
-                "Capturing PID {pid} ({:.1} ms P99, {dropped_count} dropped in last 240 frames)",
+                "Capturing PID {pid}; first observed swapchain only ({:.1} ms P99, {dropped_count} dropped in last 240 frames). Event correlation requires mapped QPCTime; receipt time is not event time.",
                 p99_ms
             ),
         }
@@ -917,6 +999,8 @@ fn unavailable_capture(
         provider_name: "Intel PresentMon ETW (non-injecting)".into(),
         target_pid: None,
         target_executable: None,
+        target_creation_stamp: None,
+        capture_session_id: None,
         fps: Metric::missing(
             "fps",
             "fps",
@@ -1007,6 +1091,30 @@ pub fn is_process_alive(pid: u32) -> bool {
 
 #[cfg(target_os = "windows")]
 mod platform {
+    pub(super) fn qpc_anchor() -> Option<(u64, u64, u64)> {
+        use windows::Win32::System::Performance::{
+            QueryPerformanceCounter, QueryPerformanceFrequency,
+        };
+        let (mut counter, mut after, mut frequency) = (0, 0, 0);
+        unsafe { QueryPerformanceFrequency(&mut frequency) }.ok()?;
+        unsafe { QueryPerformanceCounter(&mut counter) }.ok()?;
+        let epoch_ms = timestamp_ms();
+        unsafe { QueryPerformanceCounter(&mut after) }.ok()?;
+        // Reject a descheduled anchor. The UTC timestamp is bracketed by QPC
+        // reads; an unbounded gap must not look like a precise time mapping.
+        if counter <= 0
+            || frequency <= 0
+            || after < counter
+            || (after - counter) as i128 * 1000 > frequency as i128 * 2
+        {
+            return None;
+        }
+        Some((
+            (counter + (after - counter) / 2) as u64,
+            frequency as u64,
+            epoch_ms,
+        ))
+    }
     use super::{
         CpuTimes, GpuAdapterInfo, GpuTelemetry, Metric, MetricStatus, aggregate_gpu_engine_samples,
         timestamp_ms,
@@ -1488,6 +1596,9 @@ mod platform {
 
 #[cfg(not(target_os = "windows"))]
 mod platform {
+    pub(super) fn qpc_anchor() -> Option<(u64, u64, u64)> {
+        None
+    }
     use super::{CpuTimes, GpuAdapterInfo, GpuTelemetry, Metric, MetricStatus, timestamp_ms};
     use std::collections::HashMap;
 
@@ -1662,6 +1773,32 @@ mod tests {
         .enumerate()
         .map(|(i, c)| (c.trim().to_ascii_lowercase(), i))
         .collect()
+    }
+
+    #[test]
+    fn frame_clock_maps_provider_time_independently_of_csv_delay() {
+        let clock = FrameClock {
+            qpc: 1_000_000,
+            frequency: 1_000_000,
+            epoch_ms: 10_000,
+            started: std::time::Instant::now(),
+        };
+        assert_eq!(clock.map(2_000_000, 15_000, 5_000), Some(11_000));
+        assert_eq!(clock.map(2_000_000, 17_000, 5_000), None); // UTC drift
+        assert_eq!(clock.map(20_000_000, 15_000, 5_000), None); // future event
+        assert_eq!(clock.map(0, 15_000, 5_000), None);
+        let mut columns = pm_columns();
+        columns.insert("qpctime".into(), 12);
+        let frame = parse_presentmon_frame(
+            "game.exe,42,0x1,DXGI,1,0,Flip,0,1.25,1,16.6,5,2000000",
+            &columns,
+            42,
+            15000,
+        )
+        .unwrap();
+        assert_eq!(frame.provider_qpc, Some(2_000_000));
+        assert_eq!(frame.provider_seconds, Some(1.25));
+        assert_eq!(frame.event_ms, None); // only the QPC clock may map it
     }
 
     #[test]

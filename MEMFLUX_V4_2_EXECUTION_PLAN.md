@@ -113,3 +113,7 @@ Unchanged from V4.1: **confirmed** = Insider build 26340 x64 (this host); **unve
 - [ ] Live PresentMon game capture → Stutter Detective event correlation spot-check.
 - [ ] Performance Proof run with a real workload (baseline → PowerShift → compare) and honest result recording.
 - [ ] `docs/SECURITY.md` / `docs/TESTING.md` updates for the new IPC bounds and shutdown lifecycle.
+
+## Atlas integrity follow-up — 2026-10-19
+
+The Atlas continuation supersedes Phase F interpretation/timing and IPC/HUD integrity claims above: removed unused recent_frames (strict Clippy blocker); drained canceled overlapped I/O; reset events; waited for client release before pipe disconnect; separated QPC event time from CSV arrival; withheld current FPS on unavailable/stale mapping; neutralized CPU/GPU/RAM Proof deltas and removed the unjustified noise heuristic; added warm-up/duration floors and final native-memory report hydration; protected settings saves and Mini HUD freshness. See the Atlas ledger for measured tests and remaining gates. Live PresentMon gameplay, full statistical experiment qualification and whole-app overhead remain unverified.

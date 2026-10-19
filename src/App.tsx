@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState, type CSSProperties, type Rea
 import { useMemFlux } from "./hooks/useMemFlux";
 import { native } from "./lib/native";
 import { PerformanceHud } from "./components/PerformanceHud";
+import { BottleneckAtlas } from "./components/BottleneckAtlas";
 import {
   availablePercent,
   formatBytes,
@@ -29,7 +30,8 @@ import type {
   ProofReport,
   RuntimeStatus,
   SettingsEnvelope,
-  TelemetryFrame
+  TelemetryFrame,
+  TelemetryHistoryFrame
 } from "./types";
 
 // Rewind V2 lifecycle: entries carrying a live restoration obligation.
@@ -65,7 +67,7 @@ const NAVIGATION: Array<{ id: PageId; label: string; caption: string; icon: Icon
   { id: "overview", label: "Overview", caption: "System & cleaner", icon: "overview" },
   { id: "memory", label: "Memory Control", caption: "Cleaner & Guardian", icon: "shield" },
   { id: "performance", label: "Performance Control", caption: "GameFocus & PowerShift", icon: "pulse" },
-  { id: "intelligence", label: "Performance Intelligence", caption: "Sensors & FrameLab", icon: "explorer" },
+  { id: "intelligence", label: "Bottleneck Atlas", caption: "Evidence & experiments", icon: "explorer" },
   { id: "settings", label: "Settings", caption: "HUD, profiles & policy", icon: "settings" }
 ];
 
@@ -280,7 +282,7 @@ function AppShell({
             <span className={`engine-orbit ${paused ? "is-paused" : ""}`}><Icon name="pulse" size={17} /></span>
             <span><strong>{paused ? "Monitoring paused" : "Engine online"}</strong><small>{frame ? `Sample #${frame.snapshot.sequence}` : "Initializing sensors"}</small></span>
           </div>
-          <div className="version-row"><span>V4.1 Beta Candidate</span><span>v0.2.0</span></div>
+          <div className="version-row"><span>Release Candidate</span><span>v1.0.0</span></div>
         </div>
       </aside>
 
@@ -408,7 +410,7 @@ function MemoryComposition({ snapshot }: { snapshot: MemorySnapshot }) {
   );
 }
 
-function TrendGraph({ history }: { history: TelemetryFrame[] }) {
+function TrendGraph({ history }: { history: TelemetryHistoryFrame[] }) {
   const width = 680;
   const height = 208;
   const padding = 18;
@@ -575,7 +577,7 @@ function OverviewPage({
   onNavigate
 }: {
   frame: TelemetryFrame;
-  history: TelemetryFrame[];
+  history: TelemetryHistoryFrame[];
   capability: ActionCapability;
   runtime: RuntimeStatus | null;
   actions: ActionRecord[];
@@ -1263,12 +1265,12 @@ function SensorRow({ label, metric, description }: { label: string; metric: Metr
 
 function IntelligencePage({
   frame,
-  history,
+  paused,
   onStartFpsCapture,
   onStopFpsCapture
 }: {
   frame: TelemetryFrame;
-  history: TelemetryFrame[];
+  paused: boolean;
   onStartFpsCapture: (pid: number, executableName: string) => Promise<void>;
   onStopFpsCapture: () => Promise<void>;
 }) {
@@ -1280,6 +1282,7 @@ function IntelligencePage({
   const [manualExe, setManualExe] = useState("game.exe");
   const [proof, setProof] = useState<ProofReport | null>(null);
   const [proofBusy, setProofBusy] = useState(false);
+  const [proofError, setProofError] = useState<string | null>(null);
 
   const refreshProof = useCallback(() => {
     native
@@ -1297,25 +1300,14 @@ function IntelligencePage({
   }, [proof?.active, refreshProof]);
   const runProof = useCallback((action: () => Promise<ProofReport>) => {
     setProofBusy(true);
+    setProofError(null);
     action()
       .then(setProof)
-      .catch(() => undefined)
+      .catch((reason: unknown) => setProofError(String(reason)))
       .finally(() => setProofBusy(false));
   }, []);
 
   const stutters = fps?.recentStutters ?? [];
-  const correlate = (atMs: number) => {
-    let best: TelemetryFrame | null = null;
-    let bestDelta = Number.POSITIVE_INFINITY;
-    for (const item of history) {
-      const delta = Math.abs(item.snapshot.timestampMs - atMs);
-      if (delta < bestDelta) {
-        bestDelta = delta;
-        best = item;
-      }
-    }
-    return bestDelta <= 2_500 ? best : null;
-  };
 
   const sensors: Array<{ label: string; metric: Metric; description: string }> = [
     { label: "CPU utilization", metric: frame.cpuUtilization, description: "Overall CPU busy delta (idle included in kernel)" },
@@ -1340,9 +1332,9 @@ function IntelligencePage({
   return (
     <div className="page-stack">
       <PageTitle
-        eyebrow="Performance Intelligence"
-        title="Every number has provenance."
-        description="Inspect CPU, WDDM GPU Engine attribution, memory counters, background contention, and non-injecting PresentMon frame capture."
+        eyebrow="Bottleneck Atlas"
+        title="Find the constraint. Follow the evidence."
+        description="Investigate measured conditions, inspect evidence gaps, and test a focused hypothesis."
         side={
           <div className="capability-chip">
             <span className={`sensor-dot sensor-${snapshot.collectionStatus === "monitoring" ? "available" : "error"}`} />
@@ -1350,6 +1342,8 @@ function IntelligencePage({
           </div>
         }
       />
+
+      <BottleneckAtlas frame={frame} paused={paused} proofActive={proof?.active ?? false} onExperiment={(id) => runProof(() => native.beginProofSession(id))} />
 
       {gpu && gpu.availableAdapters.length > 0 && (
         <section className="panel sensor-panel" style={{ marginBottom: 14 }}>
@@ -1456,18 +1450,15 @@ function IntelligencePage({
                     <th>Frame time</th>
                     <th>Baseline p95</th>
                     <th>Severity</th>
-                    <th>Correlated telemetry</th>
+                    <th>Atlas investigation</th>
                   </tr>
                 </thead>
                 <tbody>
                   {stutters.slice().reverse().map((event) => {
-                    const match = correlate(event.atMs);
-                    const cpuV = match?.cpuUtilization.value;
-                    const gpuV = match?.gpuTelemetry?.utilization.value;
-                    const avail = match?.snapshot.availablePhysicalBytes.value;
+                    const investigation = frame.atlas?.incidents.find((item) => item.sessionId === fps.captureSessionId && item.id.endsWith(`:${event.id}`));
                     return (
                       <tr key={event.id}>
-                        <td><small>{formatTimestamp(event.atMs)}</small></td>
+                        <td><small>{event.atMs === null ? "Event time unavailable" : formatTimestamp(event.atMs)}</small></td>
                         <td className="sensor-value">{event.frameTimeMs.toFixed(1)} ms</td>
                         <td className="sensor-value">{event.baselineP95Ms.toFixed(1)} ms ({event.ratio.toFixed(1)}×)</td>
                         <td>
@@ -1476,13 +1467,7 @@ function IntelligencePage({
                           </span>
                         </td>
                         <td>
-                          {match ? (
-                            <small>
-                              CPU {cpuV == null ? "—" : `${cpuV.toFixed(0)}%`} · GPU {gpuV == null ? "—" : `${gpuV.toFixed(0)}%`} · Free {avail == null ? "—" : formatBytes(avail, 0)}
-                            </small>
-                          ) : (
-                            <small>Outside retained telemetry window</small>
-                          )}
+                          <small>{investigation ? `${investigation.contextSamples} coarse samples · ${investigation.finding.title} · ${investigation.finding.confidence.replaceAll("_", " ")}` : "Awaiting native Atlas investigation"}</small>
                         </td>
                       </tr>
                     );
@@ -1490,7 +1475,7 @@ function IntelligencePage({
                 </tbody>
               </table>
               <p className="settings-caveat" style={{ marginTop: 8 }}>
-                Anomalies are frame-time outliers vs. a rolling p95 baseline; the adjacent telemetry is correlation at matching timestamps — not causal proof.
+                Anomalies are frame-time outliers against a rolling p95 baseline. Atlas investigates a surrounding window of coarse measurements; missing event time suppresses correlation.
               </p>
             </div>
           )}
@@ -1509,8 +1494,9 @@ function IntelligencePage({
         </div>
         <p className="panel-note" style={{ marginTop: 10 }}>
           <Icon name="info" size={16} />
-          <span>Start baseline sampling, apply your optimization (purge, PowerShift, GameFocus), mark the boundary, then finish to compare. Results show measured deltas — correlation, not causation.</span>
+          <span>Record comparable workload windows, choose a relevant intervention yourself, then mark the boundary. Each phase requires 30 seconds after a 5-second warm-up. Resource usage is context; these descriptive deltas do not establish a performance benefit.</span>
         </p>
+        {proof?.hypothesisId && <p className="sensor-caption">Linked investigation: {proof.hypothesisId}</p>}
         <div style={{ display: "flex", gap: 10, marginTop: 12, alignItems: "center", flexWrap: "wrap" }}>
           {!proof?.active && (
             <button className="button button-primary" disabled={proofBusy} onClick={() => runProof(() => native.beginProofSession())}>
@@ -1533,7 +1519,8 @@ function IntelligencePage({
             </small>
           )}
         </div>
-        {proof && proof.comparisons.length > 0 && (
+        {proofError && <p role="alert">{proofError}</p>}
+        {proof && (
           <>
             <p className="panel-note" style={{ marginTop: 12 }}>
               <Icon name="info" size={16} />
@@ -1820,7 +1807,7 @@ export default function App() {
       return (
         <IntelligencePage
           frame={frame}
-          history={history}
+          paused={runtime?.paused ?? false}
           onStartFpsCapture={startFpsCapture}
           onStopFpsCapture={stopFpsCapture}
         />

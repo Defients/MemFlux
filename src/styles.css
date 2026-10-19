@@ -484,3 +484,21 @@ html[data-motion="reduced"] *::after { scroll-behavior: auto !important; animati
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* Atlas extends the existing content area; sidebar widths remain unchanged. */
+.atlas-panel { margin-bottom: 14px; }
+.atlas-summary { font-size: 18px; line-height: 1.5; max-width: 900px; }
+.atlas-domains { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; margin: 20px 0; }
+.atlas-domain { border: 1px solid var(--border, #342c4a); border-radius: 10px; padding: 14px; background: #19162b; }
+.atlas-domain summary { cursor: pointer; }
+.atlas-domain span { display: block; font-size: 12px; color: #b4a5cd; margin-top: 5px; }
+.atlas-domain p, .atlas-panel details p { font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.atlas-finding { border-top: 1px solid #342c4a; padding-top: 18px; }
+.atlas-finding p, .atlas-finding li { line-height: 1.6; color: #c6bdd8; }
+.atlas-experiment { background: #221c36; border-radius: 10px; padding: 18px; margin: 18px 0; }
+.atlas-experiment small { display: block; margin-top: 10px; max-width: 750px; line-height: 1.5; }
+.atlas-timeline { padding: 10px 0 18px; }
+.atlas-timeline select { max-width: 100%; display: block; margin: 10px 0; padding: 9px 12px; color: var(--text-primary); background: var(--surface-raised); border: 1px solid var(--border-bright); border-radius: 8px; }
+.atlas-panel summary:focus-visible { outline: 2px solid #bda1ff; outline-offset: 4px; }
+@media (max-width: 1050px) { .atlas-domains { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 650px) { .atlas-domains { grid-template-columns: minmax(0, 1fr); } }

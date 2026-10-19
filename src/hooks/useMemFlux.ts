@@ -14,7 +14,7 @@ const MAX_HISTORY = 90;
 
 export function useMemFlux() {
   const [frame, setFrame] = useState<TelemetryFrame | null>(null);
-  const [history, setHistory] = useState<TelemetryFrame[]>([]);
+  const [history, setHistory] = useState<Omit<TelemetryFrame, "atlas">[]>([]);
   const [settingsEnvelope, setSettingsEnvelope] = useState<SettingsEnvelope | null>(null);
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -31,10 +31,11 @@ export function useMemFlux() {
   }, []);
 
   const acceptFrame = useCallback((next: TelemetryFrame) => {
-    setFrame(next);
+    setFrame((current) => current && current.snapshot.sequence > next.snapshot.sequence ? current : next);
     setHistory((current) => {
-      if (current.at(-1)?.snapshot.sequence === next.snapshot.sequence) return current;
-      return [...current, next].slice(-MAX_HISTORY);
+      if ((current.at(-1)?.snapshot.sequence ?? -1) >= next.snapshot.sequence) return current;
+      const { atlas: _atlas, ...point } = next;
+      return [...current, point].slice(-MAX_HISTORY);
     });
   }, []);
 
@@ -55,7 +56,7 @@ export function useMemFlux() {
       .then(([latest, envelope, status, actions]) => {
         if (!active) return;
         if (latest) acceptFrame(latest);
-        setSettingsEnvelope(envelope);
+        setSettingsEnvelope((current) => current ? { ...envelope, settings: current.settings } : envelope);
         setRuntime(status);
         setActionHistory(actions);
       })
@@ -77,6 +78,12 @@ export function useMemFlux() {
     }).then((unlisten) => {
       if (active) unlisteners.push(unlisten);
       else unlisten();
+    }).catch(() => undefined);
+
+    native.onSettings((settings) => {
+      if (active) setSettingsEnvelope((current) => ({ settings, warning: null, path: current?.path ?? "" }));
+    }).then((unlisten) => {
+      if (active) unlisteners.push(unlisten); else unlisten();
     }).catch(() => undefined);
 
     native.onAction((record) => {
@@ -106,7 +113,8 @@ export function useMemFlux() {
     setSaving(true);
     setError(null);
     try {
-      const saved = await native.updateSettings(settings);
+      if (!settingsEnvelope) throw new Error("Settings have not loaded.");
+      const saved = await native.updateSettings(settings, settingsEnvelope.settings);
       setSettingsEnvelope((current) => ({
         settings: saved,
         warning: null,
@@ -114,12 +122,14 @@ export function useMemFlux() {
       }));
       await refreshRuntime();
     } catch (reason) {
+      const latest = await native.settings().catch(() => null);
+      if (latest) setSettingsEnvelope(latest);
       setError(reason instanceof Error ? reason.message : String(reason));
       throw reason;
     } finally {
       setSaving(false);
     }
-  }, [refreshRuntime]);
+  }, [refreshRuntime, settingsEnvelope]);
 
   const purgeStandby = useCallback(async () => {
     setPurging(true);

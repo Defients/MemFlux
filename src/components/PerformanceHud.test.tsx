@@ -1,5 +1,5 @@
 import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, expect, test, vi } from "vitest";
 import { PerformanceHud } from "./PerformanceHud";
 import type { TelemetryFrame } from "../types";
 
@@ -10,9 +10,9 @@ const fixture = () =>
     snapshot: {
       timestampMs: Date.now(),
       sampleIntervalMs: 1000,
-      physicalLoadPercent: { value: 57 }
+      physicalLoadPercent: { value: 57, status: "available", timestampMs: Date.now(), sampleIntervalMs: 1000 }
     },
-    cpuUtilization: { value: 34, source: "GetSystemTimes", detail: null },
+    cpuUtilization: { value: 34, source: "GetSystemTimes", detail: null, status: "available", timestampMs: Date.now(), sampleIntervalMs: 1000 },
     gpuTelemetry: {
       utilization: {
         id: "gpu_utilization_percent",
@@ -94,4 +94,13 @@ test("respects HUD per-metric customization toggles", () => {
   expect(screen.queryByLabelText("GPU 48 percent")).not.toBeInTheDocument();
   expect(screen.queryByLabelText("FPS unavailable")).not.toBeInTheDocument();
   expect(screen.getByText(/NVIDIA GeForce RTX 4060 Ti/)).toBeInTheDocument();
+});
+
+test("a new native frame is fresh before the next UI clock tick", () => {
+  vi.useFakeTimers(); vi.setSystemTime(10_000);
+  const { rerender } = render(<PerformanceHud frame={fixture()} paused={false} />);
+  vi.setSystemTime(10_750); // no interval fired; new IPC frame arrives
+  rerender(<PerformanceHud frame={fixture()} paused={false} />);
+  expect(screen.getByLabelText("CPU 34 percent")).toBeInTheDocument();
+  vi.useRealTimers();
 });

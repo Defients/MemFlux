@@ -41,3 +41,9 @@ See [MEMFLUX_V4_1_BETA_EXECUTION_PLAN.md](MEMFLUX_V4_1_BETA_EXECUTION_PLAN.md) f
 ## Safety and privacy
 
 Monitoring runs as a standard user. Manual cleaning requests UAC only for a fixed helper in the same executable, and automatic cleaning requires an explicitly authorized session helper accepting only fixed operations (`Ping`, `PurgeStandbyList`, `Shutdown`). MemFlux installs no kernel driver, performs no game-process injection, and uploads no analytics or telemetry. See [docs/SECURITY.md](docs/SECURITY.md).
+
+## Bottleneck Atlas diagnostic alpha (2026-10-19)
+
+The Bottleneck Atlas view now links the shared native sampler to a conservative memory/paging investigation, timestamped Stutter context, evidence inspection and a linked Performance Proof baseline. High CPU/GPU usage or a large standby cache alone never establishes a bottleneck. Storage latency, attributed game VRAM, thermal/throttle and OBS statistics remain unavailable.
+
+Integrity repairs cover IPC cancellation lifetime and reply-disconnect ordering, QPC event/arrival separation, neutral Proof resource deltas, HUD freshness and stale-settings conflicts. Live PresentMon gameplay and full application overhead qualification are pending. See [the Atlas ledger](MEMFLUX_BOTTLENECK_ATLAS_V1_IMPLEMENTATION_PLAN.md) for implemented, tested and deferred scope.

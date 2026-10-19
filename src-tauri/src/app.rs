@@ -40,6 +40,7 @@ fn action_id(origin: &str, timestamp: u64) -> String {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TelemetryFrame {
+    pub atlas: crate::atlas::AtlasReport,
     pub cpu_utilization: crate::telemetry::Metric,
     pub gpu_telemetry: GpuTelemetry,
     pub fps_capture: FpsCaptureStatus,
@@ -159,6 +160,15 @@ pub struct AppState {
 }
 
 impl AppState {
+    fn edit_settings(&self, edit: impl FnOnce(&mut AppSettings)) -> Result<AppSettings, String> {
+        let mut control = self.control.lock().unwrap_or_else(|e| e.into_inner());
+        let mut next = control.settings.clone();
+        edit(&mut next);
+        let saved = self.settings_store.save(&next)?;
+        control.settings = saved.clone();
+        Ok(saved)
+    }
+
     fn new(
         store: SettingsStore,
         envelope: SettingsEnvelope,
@@ -325,16 +335,10 @@ impl AppState {
         if let Ok(mut pending) = self.mini_hud_pending.lock()
             && let Some((x, y)) = pending.0
         {
-            let settings = {
-                let mut control = self
-                    .control
-                    .lock()
-                    .unwrap_or_else(|error| error.into_inner());
-                control.settings.mini_hud_x = Some(x);
-                control.settings.mini_hud_y = Some(y);
-                control.settings.clone()
-            };
-            if let Err(error) = self.settings_store.save(&settings) {
+            if let Err(error) = self.edit_settings(|settings| {
+                settings.mini_hud_x = Some(x);
+                settings.mini_hud_y = Some(y);
+            }) {
                 log::warn!("Final Mini HUD position flush failed: {error}");
             }
             pending.0 = None;
@@ -398,6 +402,7 @@ fn get_settings(state: State<'_, Arc<AppState>>) -> SettingsEnvelope {
 fn update_settings(
     app: tauri::AppHandle,
     settings: AppSettings,
+    expected_settings: AppSettings,
     state: State<'_, Arc<AppState>>,
 ) -> Result<AppSettings, String> {
     if state.is_shutting_down() {
@@ -408,7 +413,10 @@ fn update_settings(
             .control
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let persisted = state.settings_store.save(&settings)?;
+        let persisted =
+            state
+                .settings_store
+                .save_checked(&control.settings, &expected_settings, &settings)?;
         control.settings = persisted.clone();
         persisted
     };
@@ -417,10 +425,23 @@ fn update_settings(
         .lock()
         .unwrap_or_else(|error| error.into_inner()) = None;
     sync_mini_hud(&app, &persisted);
+    let _ = app.emit("settings://changed", &persisted);
     state.wake.notify_all();
     state.cleaner_wake.notify_all();
     log::info!("Settings updated and persisted.");
     Ok(persisted)
+}
+
+#[tauri::command]
+fn disable_mini_hud(app: tauri::AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    if state.is_shutting_down() {
+        return Err("MemFlux is shutting down.".into());
+    }
+    let settings = state.edit_settings(|next| next.mini_hud_enabled = false)?;
+    sync_mini_hud(&app, &settings);
+    let _ = app.emit("settings://changed", &settings);
+    state.wake.notify_all();
+    Ok(())
 }
 
 #[tauri::command]
@@ -701,7 +722,10 @@ fn stop_fps_capture(state: State<'_, Arc<AppState>>) -> FpsCaptureStatus {
 // ── V4.2 Performance Proof ───────────────────────────────────────────────────
 
 #[tauri::command]
-fn begin_proof_session(state: State<'_, Arc<AppState>>) -> Result<ProofReport, String> {
+fn begin_proof_session(
+    state: State<'_, Arc<AppState>>,
+    hypothesis_id: Option<String>,
+) -> Result<ProofReport, String> {
     if state.is_shutting_down() {
         return Err("MemFlux is shutting down; measurement cannot start.".into());
     }
@@ -711,10 +735,17 @@ fn begin_proof_session(state: State<'_, Arc<AppState>>) -> Result<ProofReport, S
             .proof
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        if state.proof_active.load(Ordering::Relaxed) {
+            return Err(
+                "A Proof session is already active. Finish it before beginning another baseline."
+                    .into(),
+            );
+        }
         proof.begin(now_ms);
+        proof.hypothesis_id = hypothesis_id.map(|id| id.chars().take(160).collect());
+        state.proof_active.store(true, Ordering::Relaxed);
         proof.status()
     };
-    state.proof_active.store(true, Ordering::Relaxed);
     log::info!("Performance Proof baseline sampling started.");
     Ok(report)
 }
@@ -742,6 +773,10 @@ fn mark_proof_change(
 #[tauri::command]
 fn proof_session_status(state: State<'_, Arc<AppState>>) -> ProofReport {
     if !state.proof_active.load(Ordering::Relaxed) {
+        let proof = state.proof.lock().unwrap_or_else(|e| e.into_inner());
+        if proof.started_ms != 0 {
+            return proof.status();
+        }
         return ProofReport {
             active: false,
             phase: None,
@@ -750,6 +785,7 @@ fn proof_session_status(state: State<'_, Arc<AppState>>) -> ProofReport {
             comparisons: Vec::new(),
             verdict: "No session active.".into(),
             caveat: String::new(),
+            hypothesis_id: None,
         };
     }
     state
@@ -762,12 +798,12 @@ fn proof_session_status(state: State<'_, Arc<AppState>>) -> ProofReport {
 /// Final report, then the session stops collecting.
 #[tauri::command]
 fn end_proof_session(state: State<'_, Arc<AppState>>) -> ProofReport {
-    state.proof_active.store(false, Ordering::Relaxed);
-    let report = state
+    let mut proof = state
         .proof
         .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .report();
+        .unwrap_or_else(|error| error.into_inner());
+    state.proof_active.store(false, Ordering::Relaxed);
+    let report = proof.finish();
     log::info!("Performance Proof session ended: {}", report.verdict);
     report
 }
@@ -1154,16 +1190,10 @@ fn note_mini_hud_position(state: &AppState, x: i32, y: i32) {
         return;
     }
     pending.1 = Instant::now();
-    let settings = {
-        let mut control = state
-            .control
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        control.settings.mini_hud_x = Some(x);
-        control.settings.mini_hud_y = Some(y);
-        control.settings.clone()
-    };
-    if let Err(error) = state.settings_store.save(&settings) {
+    if let Err(error) = state.edit_settings(|settings| {
+        settings.mini_hud_x = Some(x);
+        settings.mini_hud_y = Some(y);
+    }) {
         log::warn!("Could not persist Mini HUD position: {error}");
     }
 }
@@ -1304,6 +1334,7 @@ fn spawn_sampler(app: tauri::AppHandle, state: Arc<AppState>) {
             let mut cpu = CpuSensor::default();
             let mut gpu = GpuSensor::default();
             let mut guardian = GuardianEvaluator::new();
+            let mut atlas = crate::atlas::AtlasEngine::default();
             let mut sequence = 0_u64;
 
             loop {
@@ -1341,7 +1372,7 @@ fn spawn_sampler(app: tauri::AppHandle, state: Arc<AppState>) {
                     let decision = guardian.evaluate(&snapshot, settings.guardian_enabled);
                     let hud_active = ui_active
                         && (settings.performance_hud_enabled || settings.mini_hud_enabled);
-                    let cpu_metric = cpu.collect(interval_ms, hud_active && settings.hud_show_cpu);
+                    let cpu_metric = cpu.collect(interval_ms, ui_active || state.proof_active.load(Ordering::Relaxed));
                     let gpu_telemetry = gpu.collect(
                         interval_ms,
                         (hud_active && settings.hud_show_gpu) || settings.gamefocus_enabled,
@@ -1385,7 +1416,9 @@ fn spawn_sampler(app: tauri::AppHandle, state: Arc<AppState>) {
                         .unwrap_or_else(|error| error.into_inner())
                         .clone();
 
+                    let atlas = atlas.observe(&snapshot, &cpu_metric, &gpu_telemetry, &fps_capture, crate::telemetry::timestamp_ms());
                     let frame = TelemetryFrame {
+                        atlas,
                         cpu_utilization: cpu_metric,
                         gpu_telemetry,
                         fps_capture,
@@ -1412,8 +1445,8 @@ fn spawn_sampler(app: tauri::AppHandle, state: Arc<AppState>) {
                     {
                         proof.observe(ProofSample {
                             at_ms: frame.snapshot.timestamp_ms,
-                            cpu_percent: frame.cpu_utilization.value,
-                            gpu_percent: frame.gpu_telemetry.utilization.value,
+                            cpu_percent: frame.cpu_utilization.fresh_value(frame.atlas.timestamp_ms),
+                            gpu_percent: frame.gpu_telemetry.utilization.fresh_value(frame.atlas.timestamp_ms),
                             ram_used_bytes: match (
                                 frame.snapshot.total_physical_bytes.value,
                                 frame.snapshot.available_physical_bytes.value,
@@ -1421,9 +1454,9 @@ fn spawn_sampler(app: tauri::AppHandle, state: Arc<AppState>) {
                                 (Some(total), Some(avail)) => Some((total - avail).max(0.0)),
                                 _ => None,
                             },
-                            fps: frame.fps_capture.fps.value,
-                            frame_ms: frame.fps_capture.frame_time_ms.value,
-                            frame_p99_ms: frame.fps_capture.frame_time_p99_ms,
+                            fps: frame.fps_capture.fps.fresh_value(frame.atlas.timestamp_ms),
+                            frame_ms: frame.fps_capture.frame_time_ms.fresh_value(frame.atlas.timestamp_ms),
+                            frame_p99_ms: frame.fps_capture.frame_time_ms.fresh_value(frame.atlas.timestamp_ms).and(frame.fps_capture.frame_time_p99_ms),
                         });
                     }
                     *state
@@ -1491,18 +1524,16 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         .on_menu_event(move |app, event| match event.id().as_ref() {
             "open" => show_dashboard(app),
             "toggle-minihud" => {
-                let settings = {
-                    let mut control = state
-                        .control
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner());
-                    control.settings.mini_hud_enabled = !control.settings.mini_hud_enabled;
-                    control.settings.clone()
-                };
-                if let Err(error) = state.settings_store.save(&settings) {
-                    log::warn!("Could not persist Mini HUD toggle: {error}");
+                match state.edit_settings(|settings| {
+                    settings.mini_hud_enabled = !settings.mini_hud_enabled
+                }) {
+                    Ok(settings) => {
+                        sync_mini_hud(app, &settings);
+                        let _ = app.emit("settings://changed", &settings);
+                        state.wake.notify_all();
+                    }
+                    Err(error) => log::warn!("Could not persist Mini HUD toggle: {error}"),
                 }
-                sync_mini_hud(app, &settings);
             }
             "toggle-monitoring" => {
                 let paused = state.toggle_paused();
@@ -1536,6 +1567,7 @@ pub fn run() {
             get_latest_frame,
             get_settings,
             update_settings,
+            disable_mini_hud,
             set_monitoring_paused,
             get_runtime_status,
             get_action_history,
@@ -1623,16 +1655,13 @@ pub fn run() {
                     MINI_HUD_LABEL => {
                         // Dismissing the HUD persists its disabled state.
                         let state = window.state::<Arc<AppState>>();
-                        let settings = {
-                            let mut control = state
-                                .control
-                                .lock()
-                                .unwrap_or_else(|error| error.into_inner());
-                            control.settings.mini_hud_enabled = false;
-                            control.settings.clone()
-                        };
-                        if let Err(error) = state.settings_store.save(&settings) {
-                            log::warn!("Could not persist Mini HUD disabled state: {error}");
+                        match state.edit_settings(|settings| settings.mini_hud_enabled = false) {
+                            Ok(settings) => {
+                                let _ = window.app_handle().emit("settings://changed", &settings);
+                            }
+                            Err(error) => {
+                                log::warn!("Could not persist Mini HUD disabled state: {error}")
+                            }
                         }
                     }
                     _ => {}

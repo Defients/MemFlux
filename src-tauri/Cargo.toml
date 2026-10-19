@@ -1,6 +1,6 @@
 [package]
 name = "memflux"
-version = "0.2.0"
+version = "1.0.0"
 description = "Windows standby memory cleaner with measured native outcomes"
 authors = ["CosmoTech"]
 edition = "2024"

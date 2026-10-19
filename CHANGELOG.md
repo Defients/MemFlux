@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.0 — Release Candidate · 2026-10-19
+
+- Version synchronized to `1.0.0` across `package.json`, `package-lock.json`, `tauri.conf.json`, `Cargo.toml`, `Cargo.lock`, and the sidebar footer label (`Beta Candidate` → `Release Candidate`).
+- Scope unchanged from the 2026-10-19 Bottleneck Atlas diagnostic alpha; stable Windows 10/11 qualification and live PresentMon validation remain pending.
+
+## 2026-10-19 — Bottleneck Atlas foundation / diagnostic alpha
+
+Local validation: 68 Rust tests passed (one actual power-change test excluded), 11 frontend tests passed; format, strict all-target Clippy, TypeScript/Vite and final optimized executable build passed. Remote CI/installer qualification remains pending.
+
+- Added a shared Rust sensor/evidence model, bounded 90-tick observation buffer and 64 incident investigations. First rules identify sustained joint memory/commit/page-read pressure, healthy reclaimable cache and insufficient evidence; they do not identify a causal root bottleneck.
+- Added Atlas findings, six-domain coverage disclosures, evidence/attribution inspector, incident selection and linked Proof baselines to the existing Midnight interface. CPU/GPU remain context; disk/VRAM/thermal/streaming collectors are not implemented.
+- Removed the unused test-only PresentMon method that failed strict all-target Clippy. Preserved provider QPC/relative timestamps and CSV arrival separately; unreliable mapping suppresses time correlation and current frame metrics. Selected the first observed swapchain explicitly; isolated reader state across captures. Stutter uses incremental sorted baseline maintenance and resets on mapped gaps.
+- Fixed pipe cancellation lifetime by draining completion before releasing OVERLAPPED/events/buffers, reset reused events, and bounded the wait for client release before disconnect so unread helper replies are not discarded. Native cancellation and delayed-reader regressions use no elevated operation.
+- Removed Proof's unsupported sampling-noise/significance heuristic and favorable utilization labels. Reports are descriptive only, require 30-second phases after 5-second warm-up, reject duplicate/nonfinite samples, retain the final linked report in native memory and refuse replacement of an active baseline. Full comparable-workload/repeated-trial outcome scoring remains deferred.
+- Added per-source HUD freshness/pause handling, live Mini HUD preference updates, field-specific HUD disable, optimistic settings conflict checks and serialized native settings writes. Chart history omits repeated Atlas incident payloads.
+- New functionality is an engineering alpha. Gameplay capture, native action requalification, stable Windows matrix, durable incident/experiment history, full interactive timeline and seven-mode overhead profiling remain unverified or unimplemented; historical cleaner qualification is unchanged.
+
+
 ## Unreleased — MemFlux V4.2 Reliability, Recovery & Performance Proof
 
 ### Added

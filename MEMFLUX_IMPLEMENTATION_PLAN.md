@@ -269,3 +269,9 @@ Acceptance criteria 1–6 and 9 have direct automated/runtime evidence. Criterio
 5. Build the Overview and Settings experience against live IPC/events.
 6. Add required project documentation and status labels.
 7. Run automated builds/tests, launch the real desktop app, inspect it, fix failures, and record actual outcomes here.
+
+## 2026-10-19 Bottleneck Atlas continuation
+
+Implemented first diagnostic vertical slice and relevant integrity repairs; see `MEMFLUX_BOTTLENECK_ATLAS_V1_IMPLEMENTATION_PLAN.md` for the authoritative current scope. Atlas is an engineering alpha using real existing memory/CPU/GPU sources, bounded incident context, conservative evidence and linked descriptive Proof baselines. IPC cancellation/reply ordering, provider timestamps, stale HUD values, neutral resource-delta interpretation and concurrent settings writes were corrected. `sources/` remains unchanged.
+
+This milestone does not expand cleaner compatibility, authorize new mutations, validate gameplay effects, or complete storage/VRAM/thermal/OBS and durable experiment feedback. Previous native qualification records remain historical; Atlas release and overhead gates remain partial/unverified.

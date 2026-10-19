@@ -36,11 +36,14 @@ export const native = {
   startFpsCapture: (pid: number, executableName: string) =>
     invoke<FpsCaptureStatus>("start_fps_capture", { pid, executableName }),
   stopFpsCapture: () => invoke<FpsCaptureStatus>("stop_fps_capture"),
-  beginProofSession: () => invoke<ProofReport>("begin_proof_session"),
+  beginProofSession: (hypothesisId?: string) => invoke<ProofReport>("begin_proof_session", { hypothesisId: hypothesisId ?? null }),
   markProofChange: (label?: string) => invoke<ProofReport>("mark_proof_change", { label: label ?? null }),
   proofSessionStatus: () => invoke<ProofReport>("proof_session_status"),
   endProofSession: () => invoke<ProofReport>("end_proof_session"),
-  updateSettings: (settings: AppSettings) => invoke<AppSettings>("update_settings", { settings }),
+  updateSettings: (settings: AppSettings, expectedSettings: AppSettings) => invoke<AppSettings>("update_settings", { settings, expectedSettings }),
+  disableMiniHud: () => invoke<void>("disable_mini_hud"),
+  onSettings: (handler: (settings: AppSettings) => void): Promise<UnlistenFn> =>
+    listen<AppSettings>("settings://changed", (event) => handler(event.payload)),
   setPaused: (paused: boolean) => invoke<boolean>("set_monitoring_paused", { paused }),
   onFrame: (handler: (frame: TelemetryFrame) => void): Promise<UnlistenFn> =>
     listen<TelemetryFrame>("telemetry://frame", (event) => handler(event.payload)),

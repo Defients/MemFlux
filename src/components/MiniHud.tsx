@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { native } from "../lib/native";
 import { formatBytes, formatPercent } from "../lib/format";
 import type { AppSettings, TelemetryFrame } from "../types";
+import { freshValue, frameFresh } from "../lib/freshness";
 
 /**
  * Independent floating Mini HUD. Runs inside the `minihud` webview window and
@@ -11,17 +12,32 @@ import type { AppSettings, TelemetryFrame } from "../types";
 export function MiniHud() {
   const [frame, setFrame] = useState<TelemetryFrame | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [paused, setPaused] = useState(false);
+  const [now, setNow] = useState(Date.now());
+  const currentTime = Math.max(now, Date.now());
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     let active = true;
+    let monitoringUpdated = false;
     const unlisteners: Array<() => void> = [];
-    Promise.all([native.latestFrame(), native.settings()])
-      .then(([latest, envelope]) => {
+    Promise.all([native.latestFrame(), native.settings(), native.runtimeStatus()])
+      .then(([latest, envelope, runtime]) => {
         if (!active) return;
-        if (latest) setFrame(latest);
-        setSettings(envelope.settings);
+        if (latest) setFrame((current) => current ?? latest);
+        setSettings((current) => current ?? envelope.settings);
+        if (!monitoringUpdated) setPaused(runtime.paused);
       })
       .catch(() => undefined);
+    native.onMonitoring((monitoring) => { monitoringUpdated = true; if (active) setPaused(!monitoring); })
+      .then((unlisten) => { if (active) unlisteners.push(unlisten); else unlisten(); }).catch(() => undefined);
+    native.onSettings((next) => { if (active) setSettings(next); })
+      .then((unlisten) => { if (active) unlisteners.push(unlisten); else unlisten(); }).catch(() => undefined);
     native
       .onFrame((next) => {
         if (active) setFrame(next);
@@ -38,24 +54,26 @@ export function MiniHud() {
   }, []);
 
   const close = useCallback(() => {
-    if (!settings) return;
-    const next: AppSettings = { ...settings, miniHudEnabled: false };
-    void native.updateSettings(next).catch(() => undefined);
-  }, [settings]);
+    void native.disableMiniHud().catch((reason: unknown) => setError(String(reason)));
+  }, []);
 
   const preset = settings?.miniHudPreset ?? "compact";
   const opacity = ((settings?.miniHudOpacityPercent ?? 92) / 100).toFixed(2);
 
-  const cpu = frame?.cpuUtilization.value ?? null;
-  const gpu = frame?.gpuTelemetry?.utilization.value ?? null;
+  const fresh = frameFresh(frame, paused, currentTime);
+  const metric = (value: Parameters<typeof freshValue>[0]) => fresh ? freshValue(value, currentTime) : null;
+  const cpu = metric(frame?.cpuUtilization);
+  const gpu = metric(frame?.gpuTelemetry?.utilization);
+  const total = metric(frame?.snapshot.totalPhysicalBytes);
+  const available = metric(frame?.snapshot.availablePhysicalBytes);
   const ramUsed =
-    frame && frame.snapshot.totalPhysicalBytes.value !== null && frame.snapshot.availablePhysicalBytes.value !== null
-      ? frame.snapshot.totalPhysicalBytes.value - frame.snapshot.availablePhysicalBytes.value
+    total !== null && available !== null && available <= total
+      ? total - available
       : null;
-  const fps = frame?.fpsCapture?.fps.value ?? null;
-  const frameMs = frame?.fpsCapture?.frameTimeMs.value ?? null;
-  const p99 = frame?.fpsCapture?.frameTimeP99Ms ?? null;
-  const cleanerState = frame?.cleanerStatus?.label ?? "—";
+  const fps = metric(frame?.fpsCapture?.fps);
+  const frameMs = metric(frame?.fpsCapture?.frameTimeMs);
+  const p99 = frameMs === null ? null : frame?.fpsCapture?.frameTimeP99Ms ?? null;
+  const cleanerState = fresh ? frame?.cleanerStatus?.label ?? "—" : "Paused / awaiting fresh data";
 
   return (
     <div className="minihud-root" style={{ opacity }}>
@@ -106,7 +124,8 @@ export function MiniHud() {
           </div>
         )}
       </div>
-      {preset === "detailed" && <div className="minihud-footer">{cleanerState}</div>}
+      {(!fresh || preset === "detailed") && <div className="minihud-footer">{cleanerState}</div>}
+      {error && <div role="alert">{error}</div>}
     </div>
   );
 }

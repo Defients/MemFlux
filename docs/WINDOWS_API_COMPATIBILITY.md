@@ -30,3 +30,13 @@
   - Verified enumeration of `Balanced` (`381b4222-f694-41f0-9685-ff5bb260df2e`), `High performance` (`8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c`), and `Power saver` (`a1841308-3541-4fab-bc81-f71556f20b4a`), live `PowerSetActiveScheme` switch + `PowerGetActiveScheme` verification, and exact restoration to the original scheme via `RewindJournal`.
 
 Stable Windows 10 (`19045`) and Windows 11 (`22631`, `26100`) builds remain marked `unverified` in the compatibility matrix until controlled runtime tests are executed on those hosts.
+
+## Atlas session evidence — 2026-10-19
+
+Current host registry: EditionID `Core`, CurrentBuild `26340`, UBR `9750`, DisplayVersion `26H2`; legacy ProductName reports `Windows 10 Home` (do not use that string alone to identify Windows 11 branding). `whoami /groups` reports medium integrity (`S-1-16-8192`); tests run unelevated on x64. Live DXGI/WDDM identifies `NVIDIA GeForce RTX 4060 Ti`, LUID `0x00000000_0x00017a11`.
+
+New read-only integration: actual GlobalMemoryStatusEx/GetPerformanceInfo/PDH/GetSystemTimes/WDDM readings pass through Atlas at 1-second cadence. Third captured sample: physical total `34,055,766,016` bytes; available `9,575,735,296`; commit `40,015,548,416 / 48,286,560,256`; standby `8,936,275,968`; free/zero `639,393,792`; page reads `27.79/s`; CPU `51.54%`; selected-adapter busiest engine `21.57%`. This is one observation during development, not a reference-counter accuracy or workload-performance test. Atlas correctly retains the no-reliable-bottleneck conclusion.
+
+PresentMon was not found by the existing discovery path. QPC/CSV mapping and delayed delivery are fixture-tested; actual provider version/gameplay alignment remains unverified. New native pipe tests verified cancellation completion and delayed reply reads without UAC or an actual purge. No new NtSetSystemInformation invocation or raw native NTSTATUS is claimed. No new builds are allowlisted, and stable Windows 10/11 qualification remains pending.
+
+Profiling host identity also read from the CPU registry: `13th Gen Intel(R) Core(TM) i7-13700F`; .NET reports 24 logical processors and OSArchitecture `X64`.

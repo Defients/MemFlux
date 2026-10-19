@@ -30,6 +30,15 @@ pub struct Metric {
 }
 
 impl Metric {
+    pub fn fresh_value(&self, now_ms: u64) -> Option<f64> {
+        (self.status == MetricStatus::Available
+            && self.timestamp_ms <= now_ms
+            && now_ms - self.timestamp_ms <= self.sample_interval_ms.saturating_mul(3).max(3_500))
+        .then_some(self.value)
+        .flatten()
+        .filter(|v| v.is_finite() && *v >= 0.0)
+    }
+
     pub fn available(
         id: &str,
         value: f64,

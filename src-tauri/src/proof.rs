@@ -11,8 +11,8 @@ use std::collections::VecDeque;
 const PROOF_PHASE_SAMPLE_LIMIT: usize = 600;
 /// Minimum samples on each side for a comparison to be reported.
 const MIN_PROOF_SAMPLES: usize = 5;
-/// Mean separation beyond one pooled standard deviation counts as measurable.
-const MEASURABLE_SIGMA: f64 = 1.0;
+const WARMUP_MS: u64 = 5_000;
+const MIN_PHASE_DURATION_MS: u64 = 30_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -62,6 +62,7 @@ pub struct ProofReport {
     pub comparisons: Vec<MetricComparison>,
     pub verdict: String,
     pub caveat: String,
+    pub hypothesis_id: Option<String>,
 }
 
 pub struct ProofSession {
@@ -71,6 +72,8 @@ pub struct ProofSession {
     baseline: VecDeque<ProofSample>,
     post: VecDeque<ProofSample>,
     action_label: Option<String>,
+    pub hypothesis_id: Option<String>,
+    finished: bool,
 }
 
 impl Default for ProofSession {
@@ -88,6 +91,8 @@ impl ProofSession {
             baseline: VecDeque::new(),
             post: VecDeque::new(),
             action_label: None,
+            hypothesis_id: None,
+            finished: false,
         }
     }
 
@@ -97,7 +102,7 @@ impl ProofSession {
     }
 
     pub fn mark_change(&mut self, now_ms: u64, label: Option<String>) {
-        if self.phase == ProofPhase::Baseline {
+        if !self.finished && self.phase == ProofPhase::Baseline {
             self.phase = ProofPhase::PostChange;
             self.change_marked_ms = Some(now_ms);
             self.action_label = label;
@@ -105,10 +110,16 @@ impl ProofSession {
     }
 
     pub fn observe(&mut self, sample: ProofSample) {
+        if self.finished {
+            return;
+        }
         let target = match self.phase {
             ProofPhase::Baseline => &mut self.baseline,
             ProofPhase::PostChange => &mut self.post,
         };
+        if target.back().is_some_and(|s| sample.at_ms <= s.at_ms) {
+            return;
+        }
         if target.len() >= PROOF_PHASE_SAMPLE_LIMIT {
             target.pop_front();
         }
@@ -116,6 +127,11 @@ impl ProofSession {
     }
 
     pub fn status(&self) -> ProofReport {
+        if self.finished {
+            let mut report = self.report();
+            report.active = false;
+            return report;
+        }
         if self.phase == ProofPhase::Baseline {
             return ProofReport {
                 active: true,
@@ -123,6 +139,7 @@ impl ProofSession {
                 baseline_samples: self.baseline.len(),
                 post_samples: 0,
                 comparisons: Vec::new(),
+                hypothesis_id: self.hypothesis_id.clone(),
                 verdict: "Baseline sampling in progress.".into(),
                 caveat: "Apply the change, then mark the boundary to start post-change sampling."
                     .into(),
@@ -131,67 +148,64 @@ impl ProofSession {
         self.report()
     }
 
+    pub fn finish(&mut self) -> ProofReport {
+        self.finished = true;
+        self.status()
+    }
+
     pub fn report(&self) -> ProofReport {
-        let baseline_ms: Vec<f64> = self.baseline.iter().map(|s| s.at_ms as f64).collect();
-        let _ = baseline_ms;
+        // Exclude each phase's first 5s. These are sampled aggregate windows,
+        // not independent frames; no significance/effective-count claim is made.
+        let baseline = usable_phase(&self.baseline, self.started_ms);
+        let post = usable_phase(&self.post, self.change_marked_ms.unwrap_or(u64::MAX));
         let mut comparisons = Vec::new();
         comparisons.extend(compare_series(
             "cpu_percent",
             "%",
-            extract(&self.baseline, |s| s.cpu_percent),
-            extract(&self.post, |s| s.cpu_percent),
-            "lower is better",
+            extract(&baseline, |s| s.cpu_percent),
+            extract(&post, |s| s.cpu_percent),
+            "context only",
         ));
         comparisons.extend(compare_series(
             "gpu_percent",
             "%",
-            extract(&self.baseline, |s| s.gpu_percent),
-            extract(&self.post, |s| s.gpu_percent),
-            "lower is better",
+            extract(&baseline, |s| s.gpu_percent),
+            extract(&post, |s| s.gpu_percent),
+            "context only",
         ));
         comparisons.extend(compare_series(
             "ram_used_bytes",
             "bytes",
-            extract(&self.baseline, |s| s.ram_used_bytes),
-            extract(&self.post, |s| s.ram_used_bytes),
-            "lower is better",
+            extract(&baseline, |s| s.ram_used_bytes),
+            extract(&post, |s| s.ram_used_bytes),
+            "context only",
         ));
         comparisons.extend(compare_series(
             "fps",
             "fps",
-            extract(&self.baseline, |s| s.fps),
-            extract(&self.post, |s| s.fps),
+            extract(&baseline, |s| s.fps),
+            extract(&post, |s| s.fps),
             "higher is better",
         ));
         comparisons.extend(compare_series(
             "frame_ms",
             "ms",
-            extract(&self.baseline, |s| s.frame_ms),
-            extract(&self.post, |s| s.frame_ms),
+            extract(&baseline, |s| s.frame_ms),
+            extract(&post, |s| s.frame_ms),
             "lower is better",
         ));
         comparisons.extend(compare_series(
             "frame_p99_ms",
             "ms",
-            extract(&self.baseline, |s| s.frame_p99_ms),
-            extract(&self.post, |s| s.frame_p99_ms),
+            extract(&baseline, |s| s.frame_p99_ms),
+            extract(&post, |s| s.frame_p99_ms),
             "lower is better",
         ));
 
-        let measurable = comparisons
-            .iter()
-            .filter(|c| c.confidence == "measurable")
-            .count();
         let verdict = if comparisons.is_empty() {
-            "Insufficient samples on both sides of the change boundary to compare.".to_string()
-        } else if measurable == 0 {
-            "Observed differences are within sampling noise; no measurable effect detected."
-                .to_string()
+            "Insufficient data: each phase needs 30 seconds after a 5-second warm-up and five valid samples.".to_string()
         } else {
-            format!(
-                "{} metric(s) moved beyond sampling noise after the change. This is a measured correlation — treat it as evidence, not proof.",
-                measurable
-            )
+            "Descriptive changes observed. Workload comparability and repeatability are unverified; no reliable performance benefit established.".to_string()
         };
 
         ProofReport {
@@ -201,17 +215,22 @@ impl ProofSession {
             post_samples: self.post.len(),
             comparisons,
             verdict,
+            hypothesis_id: self.hypothesis_id.clone(),
             caveat: "Same-workload comparisons only: ensure the scene/load is comparable between baseline and post-change. Background noise, thermal state, and other processes confound the result.".into(),
         }
     }
 }
 
-fn extract(series: &VecDeque<ProofSample>, pick: impl Fn(&ProofSample) -> Option<f64>) -> Vec<f64> {
-    series.iter().filter_map(pick).collect()
+fn extract(series: &[&ProofSample], pick: impl Fn(&ProofSample) -> Option<f64>) -> Vec<f64> {
+    series
+        .iter()
+        .filter_map(|s| pick(s))
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .collect()
 }
 
 fn mean_stddev(values: &[f64]) -> Option<(f64, f64)> {
-    if values.len() < MIN_PROOF_SAMPLES {
+    if values.len() < MIN_PROOF_SAMPLES || values.iter().any(|v| !v.is_finite() || *v < 0.0) {
         return None;
     }
     let mean = values.iter().sum::<f64>() / values.len() as f64;
@@ -220,10 +239,24 @@ fn mean_stddev(values: &[f64]) -> Option<(f64, f64)> {
     Some((mean, variance.sqrt()))
 }
 
-/// Compare two series; returns None when either side lacks enough samples.
-/// "Measurable" requires the means to differ by more than one pooled standard
-/// deviation and direction wording is explicit about which direction is
-/// "better" for each metric.
+fn usable_phase(series: &VecDeque<ProofSample>, start: u64) -> Vec<&ProofSample> {
+    let values: Vec<_> = series
+        .iter()
+        .filter(|s| s.at_ms >= start.saturating_add(WARMUP_MS))
+        .collect();
+    if values
+        .first()
+        .zip(values.last())
+        .is_none_or(|(a, b)| b.at_ms - a.at_ms < MIN_PHASE_DURATION_MS)
+    {
+        Vec::new()
+    } else {
+        values
+    }
+}
+
+/// Descriptive deltas only: aggregate windows are autocorrelated, workload
+/// equivalence is not established, and utilization has no favorable direction.
 fn compare_series(
     metric: &str,
     unit: &str,
@@ -234,19 +267,14 @@ fn compare_series(
     let (base_mean, base_std) = mean_stddev(&baseline)?;
     let (post_mean, post_std) = mean_stddev(&post)?;
     let delta = post_mean - base_mean;
-    let pooled = ((base_std + post_std) / 2.0).max(f64::EPSILON);
-    let measurable = delta.abs() > pooled * MEASURABLE_SIGMA;
-    let improved = match better_direction {
-        "lower is better" => delta < 0.0,
-        _ => delta > 0.0,
-    };
-    let direction = if !measurable {
-        "within_noise".to_string()
-    } else if improved {
-        "improved".to_string()
+    let direction = if delta > 0.0 {
+        "increased"
+    } else if delta < 0.0 {
+        "decreased"
     } else {
-        "regressed".to_string()
-    };
+        "unchanged"
+    }
+    .to_string();
     Some(MetricComparison {
         metric: metric.into(),
         unit: unit.into(),
@@ -256,13 +284,9 @@ fn compare_series(
         post_stddev: post_std,
         delta,
         direction,
-        confidence: if measurable {
-            "measurable".into()
-        } else {
-            "inconclusive".into()
-        },
+        confidence: "descriptive_only".into(),
         detail: format!(
-            "n_base={}, n_post={}; mean {base_mean:.3} -> {post_mean:.3} ({better_direction})",
+            "n_base={}, n_post={}; mean {base_mean:.3} -> {post_mean:.3} ({better_direction}; direction is descriptive, no benefit inference)",
             baseline.len(),
             post.len()
         ),
@@ -272,81 +296,68 @@ fn compare_series(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn sample(at: u64, cpu: Option<f64>, fps: Option<f64>) -> ProofSample {
-        ProofSample {
-            at_ms: at,
-            cpu_percent: cpu,
-            gpu_percent: None,
-            ram_used_bytes: None,
-            fps,
-            frame_ms: None,
-            frame_p99_ms: None,
+    #[test]
+    fn utilization_decrease_is_never_improvement() {
+        for metric in ["cpu", "gpu", "ram"] {
+            let c = compare_series(metric, "%", vec![80.0; 10], vec![20.0; 10], "context only")
+                .unwrap();
+            assert_eq!(c.direction, "decreased");
+            assert_eq!(c.confidence, "descriptive_only");
         }
     }
-
     #[test]
-    fn comparisons_require_minimum_samples() {
-        let mut session = ProofSession::new();
-        session.begin(0);
-        for i in 0..3 {
-            session.observe(sample(i, Some(50.0), Some(60.0)));
+    fn short_phases_and_invalid_samples_cannot_establish_benefit() {
+        let mut s = ProofSession::new();
+        s.begin(0);
+        for i in 0..100 {
+            s.observe(ProofSample {
+                at_ms: i,
+                cpu_percent: Some(80.0),
+                ..Default::default()
+            });
         }
-        session.mark_change(5, Some("purge".into()));
-        for i in 0..3 {
-            session.observe(sample(100 + i, Some(10.0), Some(120.0)));
+        s.mark_change(100, None);
+        for i in 101..200 {
+            s.observe(ProofSample {
+                at_ms: i,
+                cpu_percent: Some(20.0),
+                ..Default::default()
+            });
         }
-        let report = session.report();
-        assert!(report.comparisons.is_empty());
-        assert!(report.verdict.contains("Insufficient samples"));
+        assert!(s.report().comparisons.is_empty());
+        assert!(
+            compare_series(
+                "fps",
+                "fps",
+                vec![f64::NAN],
+                vec![60.0; 10],
+                "higher is better"
+            )
+            .is_none()
+        );
     }
-
     #[test]
-    fn measurable_improvement_is_labeled_measurable_not_proven() {
-        let mut session = ProofSession::new();
-        session.begin(0);
-        for i in 0..30 {
-            session.observe(sample(i, Some(80.0 + (i % 3) as f64), Some(55.0)));
+    fn representative_windows_remain_descriptive_and_exclude_warmup() {
+        let mut s = ProofSession::new();
+        s.begin(0);
+        for i in 0..=40 {
+            s.observe(ProofSample {
+                at_ms: i * 1_000,
+                cpu_percent: Some(if i < 5 { 0.0 } else { 80.0 }),
+                ..Default::default()
+            });
         }
-        session.mark_change(100, Some("powershift".into()));
-        for i in 0..30 {
-            session.observe(sample(1_000 + i, Some(40.0 + (i % 3) as f64), Some(140.0)));
+        s.mark_change(41_000, None);
+        for i in 41..=81 {
+            s.observe(ProofSample {
+                at_ms: i * 1_000,
+                cpu_percent: Some(20.0),
+                ..Default::default()
+            });
         }
-        let report = session.report();
-        let cpu = report
-            .comparisons
-            .iter()
-            .find(|c| c.metric == "cpu_percent")
-            .expect("cpu comparison");
-        assert_eq!(cpu.confidence, "measurable");
-        assert_eq!(cpu.direction, "improved");
-        let fps = report
-            .comparisons
-            .iter()
-            .find(|c| c.metric == "fps")
-            .expect("fps comparison");
-        assert_eq!(fps.direction, "improved");
-        assert!(report.verdict.contains("correlation"));
-    }
-
-    #[test]
-    fn noise_level_change_reports_inconclusive() {
-        let mut session = ProofSession::new();
-        session.begin(0);
-        for i in 0..30 {
-            session.observe(sample(i, Some(50.0 + (i % 10) as f64), None));
-        }
-        session.mark_change(100, None);
-        for i in 0..30 {
-            session.observe(sample(1_000 + i, Some(50.5 + (i % 10) as f64), None));
-        }
-        let report = session.report();
-        let cpu = report
-            .comparisons
-            .iter()
-            .find(|c| c.metric == "cpu_percent")
-            .expect("cpu comparison");
-        assert_eq!(cpu.confidence, "inconclusive");
-        assert!(report.verdict.contains("no measurable effect"));
+        let r = s.report();
+        assert_eq!(r.comparisons[0].baseline_mean, 80.0);
+        assert_eq!(r.comparisons[0].direction, "decreased");
+        assert!(r.verdict.contains("unverified"));
     }
 }

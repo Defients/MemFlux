@@ -328,6 +328,28 @@ impl SettingsStore {
         }
     }
 
+    /// Caller holds the control lock across check, save and in-memory apply.
+    /// HUD position is independently owned by the native move handler.
+    pub fn save_checked(
+        &self,
+        current: &AppSettings,
+        expected: &AppSettings,
+        proposed: &AppSettings,
+    ) -> Result<AppSettings, String> {
+        let mut expected = expected.clone();
+        expected.mini_hud_x = current.mini_hud_x;
+        expected.mini_hud_y = current.mini_hud_y;
+        if *current != expected {
+            return Err(
+                "Settings changed in another surface. Reload settings before saving again.".into(),
+            );
+        }
+        let mut next = proposed.clone();
+        next.mini_hud_x = current.mini_hud_x;
+        next.mini_hud_y = current.mini_hud_y;
+        self.save(&next)
+    }
+
     pub fn save(&self, settings: &AppSettings) -> Result<AppSettings, String> {
         let settings = settings.clone().validated();
         let parent = self
@@ -475,5 +497,26 @@ mod tests {
         );
         let _ = fs::remove_file(&path);
         let _ = fs::remove_dir(path.parent().expect("test directory"));
+    }
+    #[test]
+    fn stale_surface_save_cannot_overwrite_newer_policy_and_position_is_preserved() {
+        let path = temp_settings_path("atlas-concurrent");
+        let store = SettingsStore::new(path.clone());
+        let original = AppSettings::default();
+        let mut newer = original.clone();
+        newer.cleaner_paused = true;
+        newer.mini_hud_x = Some(123);
+        store.save(&newer).unwrap();
+        let mut stale = original.clone();
+        stale.mini_hud_enabled = false;
+        assert!(store.save_checked(&newer, &original, &stale).is_err());
+        assert!(store.load().settings.cleaner_paused);
+        let mut proposed = newer.clone();
+        proposed.hud_show_cpu = false;
+        proposed.mini_hud_x = None;
+        let saved = store.save_checked(&newer, &newer, &proposed).unwrap();
+        assert_eq!(saved.mini_hud_x, Some(123));
+        assert!(saved.cleaner_paused);
+        let _ = std::fs::remove_file(path);
     }
 }

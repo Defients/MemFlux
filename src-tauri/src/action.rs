@@ -335,7 +335,7 @@ mod platform {
     use windows::Win32::System::Threading::{
         CreateEventW, GetCurrentProcess, GetCurrentProcessId, GetExitCodeProcess, GetProcessId,
         OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
-        PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW, WaitForSingleObject,
+        PROCESS_SYNCHRONIZE, QueryFullProcessImageNameW, ResetEvent, WaitForSingleObject,
     };
     use windows::Win32::UI::Shell::{
         SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
@@ -865,8 +865,16 @@ mod platform {
 
     /// Wait for an overlapped operation against `io_handle`, polling in slices
     /// so the overall deadline and an optional cancellation flag both apply.
-    /// On timeout or cancellation the I/O is cancelled via CancelIoEx so the
-    /// OS cannot complete a stale write into a dropped buffer.
+    /// CancelIoEx only requests cancellation. Drain completion before allowing
+    /// stack OVERLAPPED, its event or caller buffers to be freed/reused. This
+    /// safety drain can exceed the request deadline; it never authorizes a retry.
+    fn cancel_and_drain(io_handle: HANDLE, overlapped: &OVERLAPPED) {
+        let _ = unsafe { CancelIoEx(io_handle, Some(overlapped)) };
+        let mut transferred = 0;
+        // Success and ERROR_OPERATION_ABORTED both mean the operation is done.
+        let _ = unsafe { GetOverlappedResult(io_handle, overlapped, &mut transferred, true) };
+    }
+
     fn wait_for_overlapped(
         io_handle: HANDLE,
         event: HANDLE,
@@ -877,7 +885,7 @@ mod platform {
         loop {
             let now = Instant::now();
             if now >= deadline {
-                let _ = unsafe { CancelIoEx(io_handle, Some(overlapped)) };
+                cancel_and_drain(io_handle, overlapped);
                 return Err("Timed out waiting for session-helper pipe I/O.".into());
             }
             let remaining_ms = deadline
@@ -894,12 +902,12 @@ mod platform {
             }
             if signaled == WAIT_TIMEOUT {
                 if cancel_flag.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
-                    let _ = unsafe { CancelIoEx(io_handle, Some(overlapped)) };
+                    cancel_and_drain(io_handle, overlapped);
                     return Err("Session-helper pipe I/O cancelled.".into());
                 }
                 continue;
             }
-            let _ = unsafe { CancelIoEx(io_handle, Some(overlapped)) };
+            cancel_and_drain(io_handle, overlapped);
             return Err(format!("Wait on session-helper pipe failed: {signaled:?}"));
         }
     }
@@ -911,6 +919,7 @@ mod platform {
         deadline: Instant,
         cancel_flag: Option<&AtomicBool>,
     ) -> Result<u32, String> {
+        unsafe { ResetEvent(event) }.map_err(|e| format!("Reset pipe write event: {e}"))?;
         let mut overlapped = OVERLAPPED {
             hEvent: event,
             ..Default::default()
@@ -939,6 +948,7 @@ mod platform {
         deadline: Instant,
         cancel_flag: Option<&AtomicBool>,
     ) -> Result<u32, String> {
+        unsafe { ResetEvent(event) }.map_err(|e| format!("Reset pipe read event: {e}"))?;
         let mut overlapped = OVERLAPPED {
             hEvent: event,
             ..Default::default()
@@ -1205,6 +1215,9 @@ mod platform {
 
         while !shutdown_flag.load(Ordering::SeqCst) {
             // Bounded accept: poll the shutdown flag while a client connects.
+            if unsafe { ResetEvent(event.0) }.is_err() {
+                break;
+            }
             let mut overlapped = OVERLAPPED {
                 hEvent: event.0,
                 ..Default::default()
@@ -1228,8 +1241,8 @@ mod platform {
                             break;
                         }
                     }
-                    if !accepted && !shutdown_flag.load(Ordering::SeqCst) {
-                        let _ = unsafe { CancelIoEx(pipe.0, Some(&overlapped)) };
+                    if !accepted {
+                        cancel_and_drain(pipe.0, &overlapped);
                     }
                     accepted
                 }
@@ -1298,16 +1311,31 @@ mod platform {
             if let Ok(bytes) = serde_json::to_vec(&response) {
                 let write_deadline = Instant::now()
                     + std::time::Duration::from_millis(HELPER_RESPONSE_WRITE_BUDGET_MS);
-                let _ = overlapped_write(
+                let written = overlapped_write(
                     pipe.0,
                     event.0,
                     &bytes,
                     write_deadline,
                     Some(shutdown_flag.as_ref()),
                 );
+                if written.is_ok() {
+                    // DisconnectNamedPipe discards unread replies. The client
+                    // closes its one-request connection after reading/validating
+                    // the response. Await that release with cancellable I/O,
+                    // rather than an unbounded FlushFileBuffers. No second
+                    // operation is accepted on this connection.
+                    let mut unexpected = [0_u8; 1];
+                    let release_deadline = Instant::now()
+                        + std::time::Duration::from_millis(HELPER_RESPONSE_WRITE_BUDGET_MS);
+                    let _ = overlapped_read(
+                        pipe.0,
+                        event.0,
+                        &mut unexpected,
+                        release_deadline,
+                        Some(shutdown_flag.as_ref()),
+                    );
+                }
             }
-            // Data already in the pipe buffer remains readable by the client
-            // after DisconnectNamedPipe; no blocking flush needed.
             let _ = unsafe { DisconnectNamedPipe(pipe.0) };
             if should_exit {
                 shutdown_flag.store(true, Ordering::SeqCst);
@@ -1773,6 +1801,214 @@ mod platform {
     #[cfg(test)]
     mod lifecycle_tests {
         use super::*;
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+        #[test]
+        fn native_pending_accept_timeout_and_shutdown_drain_before_reuse() {
+            for cancelled in [false, true] {
+                let name: Vec<u16> = format!(
+                    r"\\.\pipe\MemFluxCancelTest_{}_{}",
+                    std::process::id(),
+                    cancelled
+                )
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
+                let pipe = OwnedHandle(unsafe {
+                    CreateNamedPipeW(
+                        PCWSTR(name.as_ptr()),
+                        PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+                        PIPE_TYPE_MESSAGE
+                            | PIPE_READMODE_MESSAGE
+                            | PIPE_WAIT
+                            | PIPE_REJECT_REMOTE_CLIENTS,
+                        1,
+                        256,
+                        256,
+                        0,
+                        None,
+                    )
+                });
+                assert!(!pipe.0.is_invalid());
+                let event = create_ipc_event().unwrap();
+                let mut op = OVERLAPPED {
+                    hEvent: event.0,
+                    ..Default::default()
+                };
+                let pending = unsafe { ConnectNamedPipe(pipe.0, Some(&mut op)) }.unwrap_err();
+                assert_eq!(pending.code().0 as u32, 0x8007_0000 | ERROR_IO_PENDING.0);
+                let flag = AtomicBool::new(cancelled);
+                let result = wait_for_overlapped(
+                    pipe.0,
+                    event.0,
+                    &mut op,
+                    Instant::now() + Duration::from_millis(if cancelled { 500 } else { 5 }),
+                    Some(&flag),
+                );
+                assert!(result.is_err());
+                let mut bytes = 0;
+                let completed =
+                    unsafe { GetOverlappedResult(pipe.0, &op, &mut bytes, false) }.unwrap_err();
+                assert_eq!(completed.code().0 as u32, 0x8007_0000 | 995); // ERROR_OPERATION_ABORTED, not IO_INCOMPLETE
+                assert_eq!(unsafe { WaitForSingleObject(event.0, 0) }, WAIT_OBJECT_0);
+            }
+        }
+
+        #[test]
+        fn native_pending_read_and_write_cancel_safely() {
+            let name: Vec<u16> =
+                format!(r"\\.\pipe\MemFluxBufferCancelTest_{}", std::process::id())
+                    .encode_utf16()
+                    .chain(Some(0))
+                    .collect();
+            let pipe = OwnedHandle(unsafe {
+                CreateNamedPipeW(
+                    PCWSTR(name.as_ptr()),
+                    PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+                    PIPE_TYPE_MESSAGE
+                        | PIPE_READMODE_MESSAGE
+                        | PIPE_WAIT
+                        | PIPE_REJECT_REMOTE_CLIENTS,
+                    1,
+                    256,
+                    256,
+                    0,
+                    None,
+                )
+            });
+            assert!(!pipe.0.is_invalid());
+            let event = create_ipc_event().unwrap();
+            let mut op = OVERLAPPED {
+                hEvent: event.0,
+                ..Default::default()
+            };
+            let _ = unsafe { ConnectNamedPipe(pipe.0, Some(&mut op)) };
+            let client = OwnedHandle(
+                unsafe {
+                    CreateFileW(
+                        PCWSTR(name.as_ptr()),
+                        (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
+                        FILE_SHARE_NONE,
+                        None,
+                        OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
+                        None,
+                    )
+                }
+                .unwrap(),
+            );
+            wait_for_overlapped(
+                pipe.0,
+                event.0,
+                &mut op,
+                Instant::now() + Duration::from_secs(1),
+                None,
+            )
+            .unwrap();
+            let mut buffer = [0_u8; 16];
+            let result = overlapped_read(
+                pipe.0,
+                event.0,
+                &mut buffer,
+                Instant::now() + Duration::from_millis(5),
+                None,
+            );
+            assert!(result.unwrap_err().contains("Timed out"));
+            // The event is reset before reuse; the previous cancelled read must
+            // not satisfy this write/read pair or touch the reused buffer.
+            let client_event = create_ipc_event().unwrap();
+            overlapped_write(
+                client.0,
+                client_event.0,
+                b"ping",
+                Instant::now() + Duration::from_secs(1),
+                None,
+            )
+            .unwrap();
+            let read = overlapped_read(
+                pipe.0,
+                event.0,
+                &mut buffer,
+                Instant::now() + Duration::from_secs(1),
+                None,
+            )
+            .unwrap();
+            assert_eq!(&buffer[..read as usize], b"ping");
+            let large = vec![42_u8; 1_048_576];
+            assert!(
+                overlapped_write(
+                    pipe.0,
+                    event.0,
+                    &large,
+                    Instant::now() + Duration::from_millis(5),
+                    None
+                )
+                .is_err()
+            );
+        }
+
+        #[test]
+        fn native_delayed_reader_receives_reply_before_server_disconnects() {
+            let pid = unsafe { GetCurrentProcessId() };
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let pipe_name = format!(r"\\.\pipe\MemFluxDelayedReader_{pid}_{nonce}");
+            let session_id = format!("{pid:08x}{nonce:024x}");
+            let (server_pipe, server_session) = (pipe_name.clone(), session_id.clone());
+            let server = std::thread::spawn(move || {
+                run_session_helper_loop(pid, &server_pipe, &server_session, || 0)
+            });
+            let name: Vec<u16> = pipe_name.encode_utf16().chain(Some(0)).collect();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let client = loop {
+                if let Ok(handle) = unsafe {
+                    CreateFileW(
+                        PCWSTR(name.as_ptr()),
+                        (FILE_GENERIC_READ | FILE_GENERIC_WRITE).0,
+                        FILE_SHARE_NONE,
+                        None,
+                        OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED,
+                        None,
+                    )
+                } {
+                    break OwnedHandle(handle);
+                }
+                assert!(Instant::now() < deadline, "server pipe startup");
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            let event = create_ipc_event().unwrap();
+            let request = SessionIpcRequest {
+                protocol_version: SESSION_PROTOCOL_VERSION,
+                session_id: session_id.clone(),
+                request_id: 1,
+                operation: SessionOperation::Ping,
+            };
+            let payload = serde_json::to_vec(&request).unwrap();
+            overlapped_write(client.0, event.0, &payload, deadline, None).unwrap();
+            std::thread::sleep(Duration::from_millis(75)); // server has time to write and used to discard the reply
+            let mut reply = [0; MAX_IPC_MESSAGE_BYTES];
+            let n = overlapped_read(client.0, event.0, &mut reply, deadline, None).unwrap();
+            let response: SessionIpcResponse =
+                serde_json::from_slice(&reply[..n as usize]).unwrap();
+            assert!(response.accepted);
+            assert_eq!(response.request_id, 1);
+            drop(client); // one response read, release before another request
+            assert!(
+                send_session_request(
+                    &pipe_name,
+                    &session_id,
+                    pid,
+                    SessionOperation::Shutdown,
+                    3000
+                )
+                .unwrap()
+                .accepted
+            );
+            assert_eq!(server.join().unwrap(), 0);
+        }
 
         #[test]
         fn transport_conversion_does_not_invent_native_status() {
