@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased — MemFlux V4.1 Core Completion & Beta Candidate
+
+### Added
+
+- **Authenticated Elevated Session Helper (`action.rs`):** Named-pipe session helper (`--memflux-elevated-session-helper`) with restrictive SDDL DACL, `PIPE_REJECT_REMOTE_CLIENTS`, peer PID (`GetNamedPipeClientProcessId` / `GetNamedPipeServerProcessId`) and executable path verification, parent-process `SYNCHRONIZE` watchdog, and fixed operation enum (`Ping`, `PurgeStandbyList`, `Shutdown`).
+- **Independent Monotonic Cleaner Scheduler & Quota Ledger (`cleaner.rs`, `app.rs`):** Dedicated `memflux-cleaner` thread using `Instant` monotonic timing and persistent `cleaner-quota.json` so restarts, clock shifts, and history churn cannot bypass cooldown or hourly rate limits.
+- **Live GPU & PresentMon HUD (`performance.rs`, `PerformanceHud.tsx`):** DXGI adapter enumeration (`CreateDXGIFactory1`) and WDDM PDH `\GPU Engine(*)\Utilization Percentage` aggregation reporting the busiest engine (`3D`, `Compute`, `Copy`, `VideoDecode`, `VideoEncode`) without summing independent engines, plus non-injecting PresentMon ETW capture controller with explicit unavailable states.
+- **Optimization Rewind (`rewind.rs`):** Versioned atomic restoration journal (`rewind-journal.json`) with compare-before-restore external-override protection and startup crash recovery.
+- **PowerShift (`powershift.rs`):** Documented Win32 `PowerEnumerate`, `PowerGetActiveScheme`, `PowerSetActiveScheme`, `PowerReadFriendlyName`, and `GetSystemPowerStatus` integration with post-mutation verification and battery safeguards.
+- **GameFocus & Central Coordinator (`gamefocus.rs`, `coordinator.rs`):** Conservative game detection, user profiles (`Balanced Gaming`, `Performance Gaming`, `Gaming + Streaming`, `Custom`), Alt+Tab focus debounce, streaming protection, background workload contention intelligence, and temporary session overrides.
+- **Packaging & CI (`.github/workflows/ci.yml`, `tauri.conf.json`):** GitHub Actions CI/packaging pipeline, version consistency gate, SHA-256 artifact checksums, and Windows NSIS/MSI bundler configuration.
+
 ## Unreleased — OmniFlux V4 first slice
 
 - Added V4 repository audit, phase ledger, dependency gates and continuation checklist.

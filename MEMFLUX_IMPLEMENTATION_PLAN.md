@@ -1,11 +1,20 @@
 # MemFlux Implementation Plan
 
-**Status date:** 2026-10-18  
-**Product identity:** Midnight CosmoTech™ Windows standby-memory cleaner with measured intelligence. Manual cleaning is core capability; monitoring and Guardian explain and verify it.
+**Status date:** 2026-10-19  
+**Product identity:** Midnight CosmoTech™ Windows standby-memory cleaner with measured intelligence, GameFocus session management, and reversible PowerShift control.
 
-## Core functionality recovery — V2.0
+## Core functionality & V4.1 Beta Candidate status
 
-V4 continuation: see `MEMFLUX_OMNIFLUX_V4_IMPLEMENTATION_PLAN.md` for current scope. Foreground exclusions now observe the actual executable with limited query rights and ownership recheck. CPU/RAM sidebar HUD and persisted visibility settings are implemented as the first read-only V4 slice. Earlier descriptions of foreground observation as absent are historical. Automatic native execution and independent monotonic cleaner scheduling remain incomplete.
+See `MEMFLUX_V4_1_BETA_EXECUTION_PLAN.md` for the authoritative V4.1 execution ledger, capability matrix, verification evidence, installer artifacts, and beta gate evaluation.
+
+- Implemented & verified in V4.1:
+  - Authenticated Named Pipe elevated session helper (`--memflux-elevated-session-helper`) with restrictive SDDL DACL, `PIPE_REJECT_REMOTE_CLIENTS`, peer PID (`GetNamedPipeClientProcessId` / `GetNamedPipeServerProcessId`) and executable path verification, and parent-process `SYNCHRONIZE` watchdog.
+  - Independent monotonic cleaner scheduler (`memflux-cleaner`) and durable quota ledger (`cleaner-quota.json`).
+  - Live CPU, DXGI + WDDM `\GPU Engine(*)\Utilization Percentage` busiest-engine HUD, and optional non-injecting PresentMon ETW frame capture adapter.
+  - Optimization Rewind durable journal (`rewind-journal.json`) with compare-before-restore external-override protection and startup crash recovery.
+  - PowerShift Win32 PowrProf scheme enumeration, AC/battery detection, verified scheme activation, and automatic restoration.
+  - GameFocus conservative game identification, user profiles (`Balanced Gaming`, `Performance Gaming`, `Gaming + Streaming`, `Custom`), Alt+Tab focus debounce, streaming protection, and background workload contention intelligence.
+  - GitHub Actions CI/packaging workflow and Windows NSIS (`1.60 MiB`) + MSI (`2.14 MiB`) installer bundles.
 
 ### V3 P0 continuation — 2026-10-18
 

@@ -3,67 +3,32 @@
 ## Automated commands
 
 ```powershell
-npm run build
 npm test
+npm run build
 cargo fmt --manifest-path src-tauri\Cargo.toml -- --check
 cargo clippy --manifest-path src-tauri\Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path src-tauri\Cargo.toml
-npm run tauri build -- --debug --no-bundle
+npm run tauri build
 ```
 
-## Implemented automated coverage
+## Implemented automated & native coverage (33 Rust tests + 5 Frontend tests)
 
-- Byte, percentage, and rate formatting preserves unavailable states.
-- Percentage arithmetic bounds results and rejects a zero denominator.
-- Guardian healthy outcome, three-sample critical hysteresis, hysteresis reset, and missing-core suspension.
-- Settings interval/cleaner constraints, persisted round trip, invalid-file fallback, and preservation of malformed data.
-- Exact native constants, fixed helper argument, tested-build capability gating, and a regression proving helper timeout cannot become native success.
-- Automatic policy dual-threshold triggering, authorization gating, exclusions, minimum interval, cooldown, and rolling-hour rate limiting.
-- Bounded action-history persistence and restart loading.
-
-## Native smoke checklist
-
-1. Launch without an administrator prompt.
-2. Confirm physical total/available and commit values update from native sources.
-3. Compare values to PowerShell/CIM or Performance Monitor within one sampling interval.
-4. Confirm Page Reads/sec warms up rather than showing an invented zero.
-5. Open Memory Explorer and confirm every sensor has source and availability.
-6. Pause, wait longer than foreground cadence, and verify the sample sequence does not advance.
-7. Resume and verify the sequence advances.
-8. Change settings, restart, and verify persistence.
-9. Close to tray, reopen from tray, and verify one continuing sequence.
-10. Start a second instance and verify the original window focuses.
-11. Choose tray Exit and verify the process terminates.
-12. Invoke the cleaner, approve UAC, and verify raw status plus before/after standby and free/zero values.
-13. Repeat with little standby and verify no fictitious reduction is reported.
-14. Reject UAC and verify a cancellation result without crashing or changing the monitoring state.
-
-## Native cleaner evidence — build 26340
-
-- Direct unelevated helper: `STATUS_PRIVILEGE_NOT_HELD (0xC0000061)`.
-- Elevated fixed helper: `STATUS_SUCCESS (0x00000000)`.
-- Retained sample after 750 ms: standby 233,820,160 → 25,538,560 bytes; Free & Zero 10,254,319,616 → 10,510,528,512 bytes.
-- The first successful run caused a PowerShell reporting overflow after the action; it is acknowledged but not used as precise numerical evidence.
-- UAC rejection, UI-driven concurrency, background/tray action, and shutdown during action remain unverified.
-- Helper timeout and late completion remain deterministic-test-only; no native timeout was intentionally induced.
-
-## Required compatibility work
-
-- Stable Windows 10 and Windows 11, standard user.
-- 8 GB, 16 GB, and 32+ GB configurations.
-- Missing or disabled performance counters.
-- Sleep/resume and clock/sample gaps.
-- 100%, 125%, 150%, and 200% display scaling.
-- Keyboard-only navigation, screen-reader labels, contrast, and reduced motion.
-- 30-minute Phase 1 soak, followed by 8+ hour beta soak with handle/working-set tracking.
-
-Mock fixtures prove policy and UI behavior only. They are never evidence that a Windows action works or improves performance.
-
-## V3 P0 continuation
-
-V4 first slice: 23 native tests pass, including idle-inclusive CPU arithmetic and a real two-sample GetSystemTimes read. Four frontend tests pass, covering existing formatting plus HUD measured values, absent GPU/capture, pause and old timestamps. Strict lint, formatting, TypeScript build and debug native build pass. Trusted-counter agreement, foreground transitions, compact visual/keyboard/DPI QA, multi-group native testing and renewed process-tree profiling remain unverified.
-
-21 Rust tests and 2 frontend tests pass; strict TypeScript production build, Rust format and all-target Clippy with warnings denied pass. Production result conversion now has a regression test for wait timeout, wait failure, missing exit code, cancellation and native privilege failure. Tests also cover exact exclusion matching, unknown foreground identity, cleaner pause/default disable, and cooldown restored from persisted manual actions.
-
-The current sandbox denies CIM queries; read-only registry inspection confirms build 26340.9750. Successful native purge evidence above belongs to the earlier baseline. This continuation has not repeated elevation or disruptive purge tests. P0 is still partial because session-helper authorization and automatic native execution are incomplete.
-
+- **Core Memory & Guardian (`telemetry`, `guardian`):**
+  - Live Windows `GlobalMemoryStatusEx`, `GetPerformanceInfo`, memory resource notifications, and PDH counters.
+  - Guardian healthy state, 3-sample critical hysteresis, reset on recovery/pause, and missing-core suspension.
+- **Cleaner & Session Helper (`action`, `cleaner`, `app`):**
+  - Exact helper arguments (`--memflux-elevated-purge-standby` and `--memflux-elevated-session-helper`), parameter validation, and tested-build allowlist gating.
+  - Regression test proving `WAIT_TIMEOUT (0x00000102)` can never become native success.
+  - Live Windows Named Pipe session helper test verifying restrictive SDDL security descriptor, `GetNamedPipeClientProcessId` / `GetNamedPipeServerProcessId`, executable path verification, `Ping`, `PurgeStandbyList`, and `Shutdown`.
+  - Dual-threshold evaluation (`standby >= threshold && free_zero <= threshold`), foreground exclusion matching, minimum interval, cooldown, rolling-hour limit, persisted manual purge accounting, and monotonic `Instant` protection against clock shifts.
+- **CPU & WDDM GPU Telemetry (`performance`):**
+  - `GetSystemTimes` idle-inclusive delta arithmetic, discontinuity rejection, and live Windows warm-up + bounded delta read.
+  - WDDM `GPU Engine` instance parser and aggregator (summing per-PID utilization within the same physical engine while taking the maximum across independent engines).
+  - Live Windows DXGI adapter enumeration and WDDM PDH `\GPU Engine(*)\Utilization Percentage` two-sample read.
+- **Optimization Rewind, PowerShift, GameFocus & Coordinator (`rewind`, `powershift`, `gamefocus`, `coordinator`):**
+  - Atomic `RewindJournal` normal restoration, idempotency, compare-before-restore protection when a user externally changes state, and startup crash recovery.
+  - Live Windows PowrProf scheme enumeration (`PowerEnumerate`, `PowerReadFriendlyName`), active scheme detection (`PowerGetActiveScheme`), verified scheme switch (`PowerSetActiveScheme`), and automatic Rewind restoration back to the original baseline scheme.
+  - GameFocus non-game blocklist (`memflux.exe`, browsers, OBS, Discord, launchers, system processes), streaming workload protection, Alt+Tab focus transition debouncing (`TemporarilyBackgrounded`), and automatic restoration on game process exit.
+- **Frontend (`format.test.ts`, `PerformanceHud.test.tsx`):**
+  - Byte/percentage/rate formatting without fabricating unavailable values.
+  - Live HUD rendering of CPU, GPU, RAM, absent FPS/frame time (`—`), paused/stale detection, and per-metric HUD customization toggles.

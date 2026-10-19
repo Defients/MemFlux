@@ -4,7 +4,6 @@ import { PerformanceHud } from "./components/PerformanceHud";
 import {
   availablePercent,
   formatBytes,
-  formatCount,
   formatMetric,
   formatPercent,
   formatTimestamp,
@@ -15,20 +14,28 @@ import type {
   ActionCapability,
   ActionRecord,
   AppSettings,
+  CleanerSessionStatus,
+  CleanerStatusSummary,
+  CoordinatorSnapshot,
+  GamePreset,
+  GameProfile,
   GuardianDecision,
   MemorySnapshot,
   Metric,
   PageId,
+  PowerShiftMode,
   PressureLevel,
+  RuntimeStatus,
   SettingsEnvelope,
   TelemetryFrame
 } from "./types";
 
 const NAVIGATION: Array<{ id: PageId; label: string; caption: string; icon: IconName }> = [
-  { id: "overview", label: "Overview", caption: "Live condition", icon: "overview" },
-  { id: "explorer", label: "Memory Explorer", caption: "Sensor detail", icon: "explorer" },
-  { id: "guardian", label: "Adaptive Guardian", caption: "Decision engine", icon: "guardian" },
-  { id: "settings", label: "Settings", caption: "Behavior & display", icon: "settings" }
+  { id: "overview", label: "Overview", caption: "System & cleaner", icon: "overview" },
+  { id: "memory", label: "Memory Control", caption: "Cleaner & Guardian", icon: "shield" },
+  { id: "performance", label: "Performance Control", caption: "GameFocus & PowerShift", icon: "pulse" },
+  { id: "intelligence", label: "Performance Intelligence", caption: "Sensors & FrameLab", icon: "explorer" },
+  { id: "settings", label: "Settings", caption: "HUD, profiles & policy", icon: "settings" }
 ];
 
 type IconName = "overview" | "explorer" | "guardian" | "settings" | "pause" | "play" | "shield" | "pulse" | "info";
@@ -78,13 +85,128 @@ function StatusPill({ pressure, compact = false }: { pressure: PressureLevel; co
   );
 }
 
+function formatDurationMs(ms: number): string {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const hrs = Math.floor(totalSec / 3600);
+  const mins = Math.floor((totalSec % 3600) / 60);
+  const secs = totalSec % 60;
+  if (hrs > 0) return `${hrs}h ${mins}m ${secs}s`;
+  if (mins > 0) return `${mins}m ${secs}s`;
+  return `${secs}s`;
+}
+
+function buildPresetProfile(name: string, executable: string, preset: GamePreset): GameProfile {
+  const id = `profile-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const exe = executable.trim().toLowerCase();
+  if (preset === "performance_gaming") {
+    return {
+      id,
+      name,
+      executable: exe,
+      preset,
+      powershiftMode: "performance",
+      customPowerSchemeGuid: null,
+      cleanerOverride: "enable_during_session",
+      autoFpsCapture: true,
+      approvedPowerIntervention: true,
+      protectedApplications: ["obs64.exe", "discord.exe", "audiodg.exe"],
+      sessionLogging: true
+    };
+  }
+  if (preset === "gaming_and_streaming") {
+    return {
+      id,
+      name,
+      executable: exe,
+      preset,
+      powershiftMode: "balanced",
+      customPowerSchemeGuid: null,
+      cleanerOverride: "pause_during_session",
+      autoFpsCapture: false,
+      approvedPowerIntervention: true,
+      protectedApplications: ["obs64.exe", "obs32.exe", "discord.exe", "audiodg.exe", "voicemeeter.exe"],
+      sessionLogging: true
+    };
+  }
+  return {
+    id,
+    name,
+    executable: exe,
+    preset,
+    powershiftMode: preset === "balanced_gaming" ? "balanced" : "current_system_mode",
+    customPowerSchemeGuid: null,
+    cleanerOverride: "keep_global",
+    autoFpsCapture: false,
+    approvedPowerIntervention: preset === "balanced_gaming",
+    protectedApplications: ["obs64.exe", "discord.exe", "audiodg.exe"],
+    sessionLogging: true
+  };
+}
+
+function OnboardingBanner({
+  capability,
+  frame,
+  onComplete
+}: {
+  capability: ActionCapability;
+  frame: TelemetryFrame;
+  onComplete: () => void;
+}) {
+  const gpuName = frame.gpuTelemetry?.selectedAdapter?.name ?? "Standard WDDM Adapter";
+  const powerScheme = frame.coordinator?.powershift.activeScheme?.name ?? "System Default";
+  return (
+    <section className="panel onboarding-panel" aria-label="First-run system capability guide">
+      <div className="panel-heading">
+        <div>
+          <span className="eyebrow">Welcome to MemFlux V4.1 · CosmoTech™</span>
+          <h2>System capability scan & control guide</h2>
+        </div>
+        <button className="button button-primary" onClick={onComplete}>
+          Got it — dismiss guide
+        </button>
+      </div>
+      <div className="onboarding-grid">
+        <div className="onboarding-step">
+          <span className="policy-index">01</span>
+          <div>
+            <strong>Detected Windows & Hardware</strong>
+            <p>
+              Build {capability.osBuild ?? "unknown"} ({capability.osEdition ?? "Windows"}) • GPU: {gpuName} • Active Power Scheme: {powerScheme}. Ordinary monitoring runs without administrator rights.
+            </p>
+          </div>
+        </div>
+        <div className="onboarding-step">
+          <span className="policy-index">02</span>
+          <div>
+            <strong>Standby Cleaner & Session Authorization</strong>
+            <p>
+              {capability.supported
+                ? "This build is qualified for native standby purging. You can purge manually or authorize an elevated session helper so automatic threshold cleaning runs without surprise UAC prompts."
+                : "This Windows build is currently outside the validated standby-purge allowlist. Monitoring remains active while native cache clearing is safely disabled."}
+            </p>
+          </div>
+        </div>
+        <div className="onboarding-step">
+          <span className="policy-index">03</span>
+          <div>
+            <strong>GameFocus, PowerShift & Rewind</strong>
+            <p>
+              GameFocus detects confirmed games, protects streaming tools (OBS, Discord, audio), and applies reversible Windows power schemes tracked by the Optimization Rewind journal.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function AppShell({
   page,
   onPage,
   frame,
   paused,
   onPause,
-  hudEnabled,
+  settings,
   children
 }: {
   page: PageId;
@@ -92,9 +214,10 @@ function AppShell({
   frame: TelemetryFrame | null;
   paused: boolean;
   onPause: () => void;
-  hudEnabled: boolean;
+  settings?: AppSettings | undefined;
   children: ReactNode;
 }) {
+  const hudEnabled = settings?.performanceHudEnabled ?? true;
   return (
     <div className="app-shell">
       <aside className="sidebar" aria-label="Primary navigation">
@@ -120,20 +243,26 @@ function AppShell({
           ))}
         </nav>
 
-        {hudEnabled && <PerformanceHud frame={frame} paused={paused} />}
+        {hudEnabled && <PerformanceHud frame={frame} paused={paused} settings={settings} />}
         <div className="sidebar-footer">
           <div className="engine-status">
             <span className={`engine-orbit ${paused ? "is-paused" : ""}`}><Icon name="pulse" size={17} /></span>
             <span><strong>{paused ? "Monitoring paused" : "Engine online"}</strong><small>{frame ? `Sample #${frame.snapshot.sequence}` : "Initializing sensors"}</small></span>
           </div>
-          <div className="version-row"><span>Cleaner milestone</span><span>v0.2.0</span></div>
+          <div className="version-row"><span>V4.1 Beta Candidate</span><span>v0.2.0</span></div>
         </div>
       </aside>
 
       <main className="workspace">
         <header className="topbar">
-          <div className="breadcrumbs"><span>Memory intelligence</span><b>/</b><strong>{NAVIGATION.find((item) => item.id === page)?.label}</strong></div>
+          <div className="breadcrumbs"><span>CosmoTech™ Intelligence</span><b>/</b><strong>{NAVIGATION.find((item) => item.id === page)?.label}</strong></div>
           <div className="topbar-actions">
+            {frame?.coordinator?.gamefocus.lifecycle === "active" && (
+              <span className="status-pill status-watch is-compact">
+                <span className="status-dot" />
+                GameFocus: {frame.coordinator.gamefocus.selectedProfile?.name ?? frame.coordinator.gamefocus.activeExecutableName}
+              </span>
+            )}
             {frame && <StatusPill pressure={paused ? "paused" : frame.guardian.pressure} compact />}
             <button className="button button-quiet" onClick={onPause}>
               <Icon name={paused ? "play" : "pause"} size={17} />
@@ -169,7 +298,7 @@ function LoadingView() {
 }
 
 function ErrorBanner({ message }: { message: string }) {
-  return <div className="error-banner" role="alert"><Icon name="info" /><div><strong>Runtime connection issue</strong><span>{message}</span></div></div>;
+  return <div className="error-banner" role="alert"><Icon name="info" /><div><strong>Runtime notice</strong><span>{message}</span></div></div>;
 }
 
 function MetricCard({ label, metric, formatter, context, accent }: { label: string; metric: Metric; formatter?: (value: number | null) => string; context: string; accent: string }) {
@@ -280,7 +409,27 @@ function TrendGraph({ history }: { history: TelemetryFrame[] }) {
   );
 }
 
-function CleanerPanel({ capability, actions, purging, onPurge }: { capability: ActionCapability; actions: ActionRecord[]; purging: boolean; onPurge: () => void }) {
+function CleanerPanel({
+  capability,
+  cleanerStatus,
+  cleanerSession,
+  actions,
+  purging,
+  authorizingSession,
+  onPurge,
+  onAuthorizeSession,
+  onRevokeSession
+}: {
+  capability: ActionCapability;
+  cleanerStatus?: CleanerStatusSummary | undefined;
+  cleanerSession?: CleanerSessionStatus | undefined;
+  actions: ActionRecord[];
+  purging: boolean;
+  authorizingSession?: boolean | undefined;
+  onPurge: () => void;
+  onAuthorizeSession?: (() => void) | undefined;
+  onRevokeSession?: (() => void) | undefined;
+}) {
   const lastAction = actions.at(-1) ?? null;
   const resultClass = lastAction?.nativeRequestSucceeded ? "is-success" : lastAction ? "is-failure" : "";
   const resultTitle = !lastAction
@@ -300,15 +449,68 @@ function CleanerPanel({ capability, actions, purging, onPurge }: { capability: A
         <p>MemFlux captures real counters before and after the native request. Clearing cached data can cause later disk reads and does not guarantee better performance.</p>
         <div className={`cleaner-capability capability-${capability.status}`}>
           <span className="status-dot" />
-          <span><strong>{capability.status === "ready" ? "Native action ready" : capability.status === "requires_elevation" ? "Administrator approval required" : capability.status === "unverified" ? "Windows build awaiting validation" : "Native action unavailable"}</strong><small>{capability.explanation}</small></span>
+          <span>
+            <strong>
+              {capability.status === "ready"
+                ? "Native action ready"
+                : capability.status === "requires_elevation"
+                  ? "Administrator approval required"
+                  : capability.status === "unverified"
+                    ? "Windows build awaiting validation"
+                    : "Native action unavailable"}
+            </strong>
+            <small>{capability.explanation}</small>
+          </span>
         </div>
         <button className="purge-button" disabled={!capability.supported || purging} onClick={onPurge}>
           <Icon name="pulse" size={21} />
-          <span>{purging ? "PURGING STANDBY MEMORY…" : "PURGE STANDBY MEMORY"}<small>{capability.requiresElevation ? "Windows UAC will request approval" : "Uses the validated native memory-list operation"}</small></span>
+          <span>
+            {purging ? "PURGING STANDBY MEMORY…" : "PURGE STANDBY MEMORY"}
+            <small>
+              {cleanerSession?.authorized
+                ? "Uses active authenticated elevated session helper"
+                : capability.requiresElevation
+                  ? "Windows UAC will request approval"
+                  : "Uses the validated native memory-list operation"}
+            </small>
+          </span>
         </button>
+
+        {onAuthorizeSession && onRevokeSession && (
+          <div className="session-auth-box">
+            <div>
+              <strong>Automatic Cleaner Session: {cleanerStatus?.label ?? "Disabled"}</strong>
+              <small>
+                {cleanerSession?.detail ??
+                  "Authorize an elevated session helper to allow threshold-based automatic purging without background UAC prompts."}
+              </small>
+              {cleanerStatus && (
+                <small className="quota-meta">
+                  Hourly quota: {cleanerStatus.purgesLastHour}/{cleanerStatus.maximumPurgesPerHour} purges • Poll: {cleanerStatus.pollIntervalMs / 1000}s
+                  {cleanerStatus.cooldownRemainingMs > 0 ? ` • Cooldown: ${formatDurationMs(cleanerStatus.cooldownRemainingMs)}` : ""}
+                </small>
+              )}
+            </div>
+            <div className="session-auth-actions">
+              {cleanerSession?.authorized ? (
+                <button className="button button-quiet" onClick={onRevokeSession}>
+                  Revoke session
+                </button>
+              ) : (
+                <button
+                  className="button button-primary"
+                  disabled={!capability.supported || authorizingSession}
+                  onClick={onAuthorizeSession}
+                >
+                  {authorizingSession ? "Authorizing…" : "Authorize session helper"}
+                </button>
+              )}
+            </div>
+          </div>
+        )}
       </div>
       <div className={`cleaner-result ${resultClass}`}>
-        <span className="eyebrow">Last action</span>
+        <span className="eyebrow">Last action ({lastAction?.origin ?? "none"})</span>
         <h3>{resultTitle}</h3>
         {lastAction ? <>
           <div className="result-grid">
@@ -319,32 +521,694 @@ function CleanerPanel({ capability, actions, purging, onPurge }: { capability: A
           </div>
           <p>{lastAction.reason}</p>
           <div className="result-meta"><code>{lastAction.ntStatusHex ?? "no native status"}</code><span>{lastAction.durationMs} ms total</span><span>{formatTimestamp(lastAction.timestampMs)}</span></div>
-          {actions.length > 1 && <div className="action-history"><strong>Recent actions</strong>{actions.slice(-4).reverse().map((record) => <div key={record.id}><span>{formatTimestamp(record.timestampMs)}</span><code>{record.ntStatusHex ?? "—"}</code><span>{formatBytes(record.observedReductionBytes)}</span></div>)}</div>}
-        </> : <p>Manual actions are serialized and retained locally in a bounded history across restarts. Native acceptance and measured change are reported separately.</p>}
+          {actions.length > 1 && <div className="action-history"><strong>Recent actions</strong>{actions.slice(-4).reverse().map((record) => <div key={record.id}><span>{formatTimestamp(record.timestampMs)} ({record.origin})</span><code>{record.ntStatusHex ?? "—"}</code><span>{formatBytes(record.observedReductionBytes)}</span></div>)}</div>}
+        </> : <p>Manual and authorized automatic actions are serialized and retained locally in a bounded history across restarts. Native acceptance and measured change are reported separately.</p>}
       </div>
     </section>
   );
 }
 
-function OverviewPage({ frame, history, capability, actions, purging, onPurge }: { frame: TelemetryFrame; history: TelemetryFrame[]; capability: ActionCapability; actions: ActionRecord[]; purging: boolean; onPurge: () => void }) {
+function OverviewPage({
+  frame,
+  history,
+  capability,
+  runtime,
+  actions,
+  purging,
+  authorizingSession,
+  showOnboarding,
+  onDismissOnboarding,
+  onPurge,
+  onAuthorizeSession,
+  onRevokeSession,
+  onNavigate
+}: {
+  frame: TelemetryFrame;
+  history: TelemetryFrame[];
+  capability: ActionCapability;
+  runtime: RuntimeStatus | null;
+  actions: ActionRecord[];
+  purging: boolean;
+  authorizingSession: boolean;
+  showOnboarding: boolean;
+  onDismissOnboarding: () => void;
+  onPurge: () => void;
+  onAuthorizeSession: () => void;
+  onRevokeSession: () => void;
+  onNavigate: (page: PageId) => void;
+}) {
   const { snapshot } = frame;
+  const gf = frame.coordinator?.gamefocus;
+  const ps = frame.coordinator?.powershift;
   return (
     <div className="page-stack">
-      <PageTitle eyebrow="Command center" title="Standby memory, under your control." description="Real Windows memory telemetry around a genuine, measured standby-list purge." side={<div className="timestamp-card"><span>Last native sample</span><strong>{formatTimestamp(snapshot.timestampMs)}</strong><small>{snapshot.sampleIntervalMs / 1000}s cadence</small></div>} />
-      {snapshot.collectionStatus !== "monitoring" && <div className="degraded-banner"><Icon name="info" /><span><strong>{snapshot.collectionStatus === "degraded" ? "Partial telemetry" : "Telemetry issue"}</strong>{snapshot.collectionDetail ?? "One or more sensors are unavailable."}</span></div>}
+      <PageTitle
+        eyebrow="Command center"
+        title="Standby memory, under your control."
+        description="Real Windows memory telemetry, authorized automatic cleaning, and reversible GameFocus + PowerShift control."
+        side={
+          <div className="timestamp-card">
+            <span>Last native sample</span>
+            <strong>{formatTimestamp(snapshot.timestampMs)}</strong>
+            <small>{snapshot.sampleIntervalMs / 1000}s cadence</small>
+          </div>
+        }
+      />
+      {showOnboarding && <OnboardingBanner capability={capability} frame={frame} onComplete={onDismissOnboarding} />}
+      {snapshot.collectionStatus !== "monitoring" && (
+        <div className="degraded-banner">
+          <Icon name="info" />
+          <span>
+            <strong>{snapshot.collectionStatus === "degraded" ? "Partial telemetry" : "Telemetry issue"}</strong>
+            {snapshot.collectionDetail ?? "One or more sensors are unavailable."}
+          </span>
+        </div>
+      )}
       <section className="metric-grid">
         <MetricCard label="Standby cache" metric={snapshot.standbyBytes} formatter={formatBytes} context="Reclaimable file and application cache" accent="#a978ff" />
         <MetricCard label="Free + zero" metric={snapshot.freeZeroBytes} formatter={formatBytes} context="Unassigned physical pages" accent="#77d9b4" />
         <MetricCard label="Available memory" metric={snapshot.availablePhysicalBytes} formatter={formatBytes} context="Includes reclaimable standby" accent="#78beff" />
         <MetricCard label="Physical load" metric={snapshot.physicalLoadPercent} formatter={(value) => formatPercent(value, 1)} context={`${formatBytes(snapshot.totalPhysicalBytes.value)} total physical memory`} accent="#d58fff" />
       </section>
-      <CleanerPanel capability={capability} actions={actions} purging={purging} onPurge={onPurge} />
-      <div className="panel-note" role="status">Automatic policy: {(frame.cleanerDecision ?? "disabled").replaceAll("_", " ")}. Unattended purge authorization is not yet available.</div>
+      <CleanerPanel
+        capability={capability}
+        cleanerStatus={frame.cleanerStatus ?? runtime?.cleanerStatus}
+        cleanerSession={runtime?.cleanerSession}
+        actions={actions}
+        purging={purging}
+        authorizingSession={authorizingSession}
+        onPurge={onPurge}
+        onAuthorizeSession={onAuthorizeSession}
+        onRevokeSession={onRevokeSession}
+      />
+      <div className="panel-note" role="status">
+        Automatic policy: {frame.cleanerStatus?.label ?? (frame.cleanerDecision ?? "disabled").replaceAll("_", " ")}.{" "}
+        {runtime?.cleanerSession?.authorized
+          ? "Authenticated elevated session helper is active."
+          : "Authorize a session helper to enable unattended threshold cleaning."}
+      </div>
+
+      {gf && (
+        <section className="panel overview-session-strip">
+          <div>
+            <span className="eyebrow">GameFocus & PowerShift</span>
+            <strong>
+              {gf.lifecycle === "active" || gf.lifecycle === "temporarily_backgrounded"
+                ? `Active Session: ${gf.selectedProfile?.name ?? gf.activeExecutableName} (${gf.lifecycle.replaceAll("_", " ")})`
+                : gf.candidate
+                  ? `Candidate Detected: ${gf.candidate.executableName} (PID ${gf.candidate.pid})`
+                  : "GameFocus monitoring idle"}
+            </strong>
+            <small>
+              Power Scheme: {ps?.activeScheme?.name ?? "Unknown"}{" "}
+              {ps?.memfluxOwnsActiveChange ? "• Managed by MemFlux Rewind" : "• System / User owned"}
+            </small>
+          </div>
+          <button className="button button-quiet" onClick={() => onNavigate("performance")}>
+            Open Performance Control
+          </button>
+        </section>
+      )}
+
       <section className="overview-hero">
         <MemoryDial snapshot={snapshot} />
         <GuardianPanel decision={frame.guardian} updated={snapshot.timestampMs} />
       </section>
-      <div className="dashboard-grid"><MemoryComposition snapshot={snapshot} /><TrendGraph history={history} /></div>
+      <div className="dashboard-grid">
+        <MemoryComposition snapshot={snapshot} />
+        <TrendGraph history={history} />
+      </div>
+    </div>
+  );
+}
+
+function MemoryControlPage({
+  frame,
+  paused,
+  onPause,
+  capability,
+  runtime,
+  actions,
+  purging,
+  authorizingSession,
+  onPurge,
+  onAuthorizeSession,
+  onRevokeSession
+}: {
+  frame: TelemetryFrame;
+  paused: boolean;
+  onPause: () => void;
+  capability: ActionCapability;
+  runtime: RuntimeStatus | null;
+  actions: ActionRecord[];
+  purging: boolean;
+  authorizingSession: boolean;
+  onPurge: () => void;
+  onAuthorizeSession: () => void;
+  onRevokeSession: () => void;
+}) {
+  const decision = frame.guardian;
+  const matrix = capability.compatibilityMatrix ?? [];
+  return (
+    <div className="page-stack">
+      <PageTitle
+        eyebrow="Memory Control & Adaptive Guardian"
+        title="Assessment and cleaning policy stay distinct."
+        description="Manual and authorized automatic standby purging operate with independent monotonic scheduling, while Guardian explains memory pressure."
+        side={
+          <button className={`button ${paused ? "button-primary" : "button-quiet"}`} onClick={onPause}>
+            <Icon name={paused ? "play" : "pause"} />
+            {paused ? "Resume Monitoring" : "Pause Monitoring"}
+          </button>
+        }
+      />
+      <CleanerPanel
+        capability={capability}
+        cleanerStatus={frame.cleanerStatus ?? runtime?.cleanerStatus}
+        cleanerSession={runtime?.cleanerSession}
+        actions={actions}
+        purging={purging}
+        authorizingSession={authorizingSession}
+        onPurge={onPurge}
+        onAuthorizeSession={onAuthorizeSession}
+        onRevokeSession={onRevokeSession}
+      />
+      <GuardianPanel decision={decision} updated={frame.snapshot.timestampMs} />
+      <div className="guardian-grid">
+        <section className="panel evidence-panel">
+          <div className="panel-heading">
+            <div><span className="eyebrow">Decision trace</span><h2>Why Guardian chose {decision.outcome}</h2></div>
+            <code>{decision.reasonCode}</code>
+          </div>
+          <div className="evidence-list">
+            {decision.evidence.length ? (
+              decision.evidence.map((item, index) => (
+                <div key={item}><span>{String(index + 1).padStart(2, "0")}</span><p>{item}</p></div>
+              ))
+            ) : (
+              <div><span>—</span><p>No sensor evidence evaluated while paused.</p></div>
+            )}
+          </div>
+        </section>
+        <section className="panel safeguards-panel">
+          <span className="eyebrow">Privilege & compatibility boundary</span>
+          <h2>Native cleaner capability</h2>
+          <div className="capability-warning">
+            <Icon name="shield" />
+            <div>
+              <strong>{capability.status} (Build {capability.osBuild ?? "—"})</strong>
+              <p>{capability.explanation}</p>
+            </div>
+          </div>
+          <ul className="check-list">
+            <li><span>✓</span> Unelevated desktop monitoring process</li>
+            <li><span>✓</span> Authenticated Named Pipe session helper with peer PID + image check</li>
+            <li><span>✓</span> Independent monotonic scheduler & durable quota ledger</li>
+            <li><span>✓</span> Native NTSTATUS separated from measured standby reduction</li>
+          </ul>
+        </section>
+      </div>
+
+      {matrix.length > 0 && (
+        <section className="panel sensor-panel" style={{ marginTop: 14 }}>
+          <div className="panel-heading">
+            <div><span className="eyebrow">Windows qualification</span><h2>Compatibility matrix</h2></div>
+            <span className="sensor-caption">Private memory-list operations require explicit build qualification</span>
+          </div>
+          <div className="sensor-table-wrap">
+            <table className="sensor-table">
+              <thead>
+                <tr>
+                  <th>Windows Edition / Build</th>
+                  <th>Status</th>
+                  <th>Native Result</th>
+                  <th>Observed Behavior / Method</th>
+                </tr>
+              </thead>
+              <tbody>
+                {matrix.map((row) => (
+                  <tr key={row.build}>
+                    <td>
+                      <div>
+                        <strong>{row.windowsEdition}</strong>
+                        <small>Build {row.build}{row.revision ? `.${row.revision}` : ""} ({row.architecture})</small>
+                      </div>
+                    </td>
+                    <td>
+                      <span className={`availability-tag ${row.status === "confirmed_supported" ? "tag-available" : "tag-unavailable"}`}>
+                        {row.status.replaceAll("_", " ")}
+                      </span>
+                    </td>
+                    <td><code>{row.nativeRequestResult}</code></td>
+                    <td><small>{row.observedMemoryBehavior}</small></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+    </div>
+  );
+}
+
+function PerformanceControlPage({
+  frame,
+  settings,
+  onSaveSettings,
+  onApplyPowerShift,
+  onRestoreRewindEntry,
+  onRestoreAllRewind,
+  onActivateGameFocus,
+  onDeactivateGameFocus,
+  onStartFpsCapture,
+  onStopFpsCapture
+}: {
+  frame: TelemetryFrame;
+  settings: AppSettings;
+  onSaveSettings: (settings: AppSettings) => Promise<void>;
+  onApplyPowerShift: (mode: PowerShiftMode, customGuid?: string | null) => Promise<unknown>;
+  onRestoreRewindEntry: (actionId: string) => Promise<unknown>;
+  onRestoreAllRewind: () => Promise<unknown>;
+  onActivateGameFocus: (profile: GameProfile, pid: number | null, executablePath: string) => Promise<void>;
+  onDeactivateGameFocus: () => Promise<void>;
+  onStartFpsCapture: (pid: number, executableName: string) => Promise<void>;
+  onStopFpsCapture: () => Promise<void>;
+}) {
+  const coord: CoordinatorSnapshot | undefined = frame.coordinator;
+  const gf = coord?.gamefocus;
+  const ps = coord?.powershift;
+  const rewindEntries = coord?.rewindEntries ?? [];
+  const profiles = settings.gameProfiles ?? [];
+
+  const [newProfileName, setNewProfileName] = useState("");
+  const [newProfileExe, setNewProfileExe] = useState("");
+  const [newProfilePreset, setNewProfilePreset] = useState<GamePreset>("performance_gaming");
+  const [customSchemeGuid, setCustomSchemeGuid] = useState<string>(ps?.activeScheme?.guid ?? "");
+
+  const isSessionActive = gf?.lifecycle === "active" || gf?.lifecycle === "temporarily_backgrounded";
+
+  const handleAddProfile = async () => {
+    if (!newProfileName.trim() || !newProfileExe.trim()) return;
+    const created = buildPresetProfile(newProfileName.trim(), newProfileExe.trim(), newProfilePreset);
+    await onSaveSettings({
+      ...settings,
+      gameProfiles: [...profiles, created]
+    });
+    setNewProfileName("");
+    setNewProfileExe("");
+  };
+
+  const handleDeleteProfile = async (id: string) => {
+    await onSaveSettings({
+      ...settings,
+      gameProfiles: profiles.filter((p) => p.id !== id)
+    });
+  };
+
+  const handleConfirmCandidate = async (preset: GamePreset) => {
+    if (!gf?.candidate) return;
+    const profile = buildPresetProfile(
+      gf.candidate.executableName.replace(/\.exe$/i, ""),
+      gf.candidate.executableName,
+      preset
+    );
+    await onSaveSettings({
+      ...settings,
+      gameProfiles: [...profiles.filter((p) => p.executable !== profile.executable), profile]
+    });
+    await onActivateGameFocus(profile, gf.candidate.pid, gf.candidate.executablePath);
+  };
+
+  return (
+    <div className="page-stack">
+      <PageTitle
+        eyebrow="Performance Control"
+        title="GameFocus & PowerShift."
+        description="Detect gaming sessions, protect streaming workloads, and apply verified reversible Windows power configurations backed by Optimization Rewind."
+        side={
+          isSessionActive ? (
+            <button className="button button-primary" onClick={() => void onDeactivateGameFocus()}>
+              Deactivate GameFocus and Restore
+            </button>
+          ) : undefined
+        }
+      />
+
+      <div className="dashboard-grid">
+        <section className="panel sensor-panel">
+          <div className="panel-heading">
+            <div>
+              <span className="eyebrow">GameFocus Session</span>
+              <h2>
+                {isSessionActive
+                  ? `${gf?.selectedProfile?.name ?? gf?.activeExecutableName} (${gf?.lifecycle.replaceAll("_", " ")})`
+                  : "No active gaming session"}
+              </h2>
+            </div>
+            <span className={`availability-tag ${isSessionActive ? "tag-available" : "tag-warming_up"}`}>
+              {gf?.lifecycle.replaceAll("_", " ") ?? "idle"}
+            </span>
+          </div>
+
+          <div className="result-grid" style={{ marginTop: 14 }}>
+            <span>
+              <small>Detected Executable</small>
+              <strong>{gf?.activeExecutableName ?? gf?.candidate?.executableName ?? "None"}</strong>
+            </span>
+            <span>
+              <small>Selected Profile</small>
+              <strong>{gf?.selectedProfile?.name ?? "None"}</strong>
+            </span>
+            <span>
+              <small>Current Power Scheme</small>
+              <strong>{ps?.activeScheme?.name ?? "Unknown"}</strong>
+            </span>
+            <span>
+              <small>Session Duration</small>
+              <strong>{isSessionActive ? formatDurationMs(gf?.sessionDurationMs ?? 0) : "—"}</strong>
+            </span>
+            <span>
+              <small>Cleaner Policy Override</small>
+              <strong>{(gf?.cleanerOverride ?? "keep_global").replaceAll("_", " ")}</strong>
+            </span>
+            <span>
+              <small>FPS Capture Status</small>
+              <strong>{frame.fpsCapture?.active ? "Capturing" : "Inactive / Unavailable"}</strong>
+            </span>
+          </div>
+
+          <p className="panel-note">
+            <Icon name="shield" size={16} />
+            <span>
+              <strong>Restoration state:</strong> {gf?.restorationState ?? "No active changes."}
+            </span>
+          </p>
+
+          {gf?.activeProtectedWorkloads && gf.activeProtectedWorkloads.length > 0 && (
+            <div className="degraded-banner" style={{ marginTop: 12 }}>
+              <Icon name="shield" />
+              <span>
+                <strong>Streaming / Protected Workloads Active:</strong> {gf.activeProtectedWorkloads.join(", ")} (preserved without priority reduction)
+              </span>
+            </div>
+          )}
+
+          {gf?.recommendations && gf.recommendations.length > 0 && (
+            <div className="evidence-list" style={{ marginTop: 12 }}>
+              {gf.recommendations.map((rec, i) => (
+                <div key={rec}>
+                  <span>{String(i + 1).padStart(2, "0")}</span>
+                  <p>{rec}</p>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {!isSessionActive && gf?.candidate && (
+            <div className="session-auth-box" style={{ marginTop: 14 }}>
+              <div>
+                <strong>Foreground Candidate: {gf.candidate.executableName} (PID {gf.candidate.pid})</strong>
+                <small>{gf.candidate.executablePath}</small>
+              </div>
+              <div className="session-auth-actions">
+                <button className="button button-primary" onClick={() => void handleConfirmCandidate("performance_gaming")}>
+                  Confirm as Performance Game
+                </button>
+                <button className="button button-quiet" onClick={() => void handleConfirmCandidate("gaming_and_streaming")}>
+                  Confirm for Gaming + Streaming
+                </button>
+              </div>
+            </div>
+          )}
+
+          {isSessionActive && (
+            <div className="session-auth-actions" style={{ marginTop: 14, display: "flex", gap: 10 }}>
+              <button className="button button-primary" onClick={() => void onDeactivateGameFocus()}>
+                Deactivate GameFocus and Restore
+              </button>
+              {gf?.activePid && settings.fpsCapturePermitted && !frame.fpsCapture?.active && (
+                <button
+                  className="button button-quiet"
+                  onClick={() => void onStartFpsCapture(gf.activePid!, gf.activeExecutableName ?? "game.exe")}
+                >
+                  Start FPS Capture
+                </button>
+              )}
+              {frame.fpsCapture?.active && (
+                <button className="button button-quiet" onClick={() => void onStopFpsCapture()}>
+                  Stop FPS Capture
+                </button>
+              )}
+            </div>
+          )}
+        </section>
+
+        <section className="panel sensor-panel">
+          <div className="panel-heading">
+            <div>
+              <span className="eyebrow">PowerShift</span>
+              <h2>Windows Power Scheme Control</h2>
+            </div>
+            <span className={`availability-tag ${ps?.memfluxOwnsActiveChange ? "tag-available" : "tag-warming_up"}`}>
+              {ps?.memfluxOwnsActiveChange ? "MemFlux Rewind Owned" : "System Owned"}
+            </span>
+          </div>
+
+          <div className="result-grid" style={{ marginTop: 14 }}>
+            <span>
+              <small>Active Windows Scheme</small>
+              <strong>{ps?.activeScheme?.name ?? "Unavailable"}</strong>
+            </span>
+            <span>
+              <small>Power Supply / Battery</small>
+              <strong>
+                {ps?.powerSupply.acStatus.replaceAll("_", " ") ?? "unknown"}
+                {ps?.powerSupply.batteryPercent !== null && ps?.powerSupply.batteryPercent !== undefined
+                  ? ` (${ps.powerSupply.batteryPercent}%)`
+                  : ""}
+              </strong>
+            </span>
+            <span>
+              <small>Previous Baseline Scheme</small>
+              <strong>{ps?.activeRewindEntry?.previousStateLabel ?? "None recorded"}</strong>
+            </span>
+            <span>
+              <small>Available Schemes</small>
+              <strong>{ps?.availableSchemes.length ?? 0} enumerated</strong>
+            </span>
+          </div>
+
+          {ps?.powerSupply.warning && (
+            <div className="degraded-banner" style={{ marginTop: 12 }}>
+              <Icon name="info" />
+              <span>{ps.powerSupply.warning}</span>
+            </div>
+          )}
+
+          <div className="powershift-controls" style={{ marginTop: 14, display: "flex", flexWrap: "wrap", gap: 8 }}>
+            <button
+              className="button button-quiet"
+              disabled={!ps?.balancedSchemeAvailable}
+              onClick={() => void onApplyPowerShift("balanced")}
+            >
+              Apply Balanced Scheme
+            </button>
+            <button
+              className="button button-primary"
+              disabled={!ps?.performanceSchemeAvailable}
+              onClick={() => void onApplyPowerShift("performance")}
+            >
+              Apply Performance Scheme
+            </button>
+            {ps?.memfluxOwnsActiveChange && ps.activeRewindEntry && (
+              <button
+                className="button button-quiet"
+                onClick={() => void onRestoreRewindEntry(ps.activeRewindEntry!.actionId)}
+              >
+                Restore Previous ({ps.activeRewindEntry.previousStateLabel})
+              </button>
+            )}
+          </div>
+
+          {ps && ps.availableSchemes.length > 0 && (
+            <div className="select-row" style={{ marginTop: 12 }}>
+              <span>
+                <strong>CustomEnumerated Scheme</strong>
+                <small>Only real Windows schemes present on this machine are listed</small>
+              </span>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <select
+                  value={customSchemeGuid || ps.activeScheme?.guid || ""}
+                  onChange={(e) => setCustomSchemeGuid(e.target.value)}
+                >
+                  {ps.availableSchemes.map((scheme) => (
+                    <option key={scheme.guid} value={scheme.guid}>
+                      {scheme.name} {scheme.active ? "(Active)" : ""}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  className="button button-quiet"
+                  onClick={() => void onApplyPowerShift("custom", customSchemeGuid || ps.activeScheme?.guid)}
+                >
+                  Activate
+                </button>
+              </div>
+            </div>
+          )}
+
+          <p className="panel-note">
+            <Icon name="info" size={16} />
+            <span>{ps?.capabilityNote}</span>
+          </p>
+        </section>
+      </div>
+
+      <section className="panel sensor-panel" style={{ marginTop: 14 }}>
+        <div className="panel-heading">
+          <div>
+            <span className="eyebrow">GameFocus Profiles</span>
+            <h2>User-managed game library & presets</h2>
+          </div>
+          <span className="sensor-caption">Profiles apply temporary session overrides without overwriting global settings</span>
+        </div>
+
+        <div className="profile-creator" style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 14, alignItems: "center" }}>
+          <input
+            className="text-input"
+            placeholder="Game title (e.g. Cyberpunk 2077)"
+            value={newProfileName}
+            onChange={(e) => setNewProfileName(e.target.value)}
+          />
+          <input
+            className="text-input"
+            placeholder="Executable (e.g. cyberpunk2077.exe)"
+            value={newProfileExe}
+            onChange={(e) => setNewProfileExe(e.target.value)}
+          />
+          <select value={newProfilePreset} onChange={(e) => setNewProfilePreset(e.target.value as GamePreset)}>
+            <option value="balanced_gaming">Balanced Gaming</option>
+            <option value="performance_gaming">Performance Gaming</option>
+            <option value="gaming_and_streaming">Gaming + Streaming</option>
+            <option value="custom">Custom (Observation Only)</option>
+          </select>
+          <button className="button button-primary" onClick={() => void handleAddProfile()}>
+            Add Game Profile
+          </button>
+        </div>
+
+        {profiles.length > 0 ? (
+          <div className="sensor-table-wrap">
+            <table className="sensor-table">
+              <thead>
+                <tr>
+                  <th>Game / Executable</th>
+                  <th>Preset</th>
+                  <th>PowerShift Target</th>
+                  <th>Cleaner Override / Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {profiles.map((prof) => (
+                  <tr key={prof.id}>
+                    <td>
+                      <div>
+                        <strong>{prof.name}</strong>
+                        <small><code>{prof.executable}</code></small>
+                      </div>
+                    </td>
+                    <td>{prof.preset.replaceAll("_", " ")}</td>
+                    <td>{prof.powershiftMode.replaceAll("_", " ")}</td>
+                    <td>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <span>{prof.cleanerOverride.replaceAll("_", " ")}</span>
+                        <button
+                          className="button button-quiet"
+                          onClick={() => void onActivateGameFocus(prof, null, prof.executable)}
+                        >
+                          Activate
+                        </button>
+                        <button className="button button-quiet" onClick={() => void handleDeleteProfile(prof.id)}>
+                          Remove
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="panel-note">No game profiles saved yet. Add an executable above or confirm a detected foreground candidate.</p>
+        )}
+      </section>
+
+      <section className="panel sensor-panel" style={{ marginTop: 14 }}>
+        <div className="panel-heading">
+          <div>
+            <span className="eyebrow">Optimization Rewind</span>
+            <h2>Durable restoration journal (Compare-before-restore)</h2>
+          </div>
+          <button
+            className="button button-quiet"
+            disabled={!rewindEntries.some((e) => e.status === "active")}
+            onClick={() => void onRestoreAllRewind()}
+          >
+            Restore All Active Changes
+          </button>
+        </div>
+
+        {rewindEntries.length > 0 ? (
+          <div className="sensor-table-wrap">
+            <table className="sensor-table">
+              <thead>
+                <tr>
+                  <th>Target & Feature</th>
+                  <th>Previous → Applied State</th>
+                  <th>Status</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rewindEntries.slice(-10).reverse().map((entry) => (
+                  <tr key={entry.actionId}>
+                    <td>
+                      <div>
+                        <strong>{entry.targetIdentity}</strong>
+                        <small>{entry.initiatingFeature} • {formatTimestamp(entry.timestampMs)}</small>
+                      </div>
+                    </td>
+                    <td>
+                      <div>
+                        <strong>{entry.previousStateLabel} → {entry.intendedNewStateLabel}</strong>
+                        <small><code>{entry.observedAppliedState ?? entry.intendedNewState}</code></small>
+                      </div>
+                    </td>
+                    <td>
+                      <span className={`availability-tag ${entry.status === "active" ? "tag-warming_up" : entry.status === "restored" ? "tag-available" : "tag-unavailable"}`}>
+                        {entry.status.replaceAll("_", " ")}
+                      </span>
+                      {entry.errorDetail && <small className="sensor-detail">{entry.errorDetail}</small>}
+                    </td>
+                    <td>
+                      {entry.status === "active" && entry.reversible ? (
+                        <button className="button button-quiet" onClick={() => void onRestoreRewindEntry(entry.actionId)}>
+                          Restore
+                        </button>
+                      ) : (
+                        <small>—</small>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="panel-note">No system mutations recorded yet. Every PowerShift change is journaled here before execution.</p>
+        )}
+      </section>
     </div>
   );
 }
@@ -360,9 +1224,29 @@ function SensorRow({ label, metric, description }: { label: string; metric: Metr
   );
 }
 
-function ExplorerPage({ frame }: { frame: TelemetryFrame }) {
+function IntelligencePage({
+  frame,
+  onStartFpsCapture,
+  onStopFpsCapture
+}: {
+  frame: TelemetryFrame;
+  onStartFpsCapture: (pid: number, executableName: string) => Promise<void>;
+  onStopFpsCapture: () => Promise<void>;
+}) {
   const snapshot = frame.snapshot;
+  const gpu = frame.gpuTelemetry;
+  const fps = frame.fpsCapture;
+  const competing = frame.coordinator?.gamefocus.competingWorkloads ?? [];
+  const [manualPid, setManualPid] = useState("");
+  const [manualExe, setManualExe] = useState("game.exe");
+
   const sensors: Array<{ label: string; metric: Metric; description: string }> = [
+    { label: "CPU utilization", metric: frame.cpuUtilization, description: "Overall CPU busy delta (idle included in kernel)" },
+    ...(gpu ? [{ label: "GPU utilization (Busiest engine)", metric: gpu.utilization, description: gpu.selectedAdapter ? `${gpu.selectedAdapter.name} (${gpu.selectedAdapter.luidKey})` : "WDDM GPU Engine counter" }] : []),
+    ...(fps ? [
+      { label: "Measured FPS", metric: fps.fps, description: "Reciprocal mean MsBetweenPresents from PresentMon ETW" },
+      { label: "Frame time (ms)", metric: fps.frameTimeMs, description: "Mean frame duration in milliseconds" }
+    ] : []),
     { label: "Installed / usable physical", metric: snapshot.totalPhysicalBytes, description: "Physical memory visible to Windows" },
     { label: "Available physical", metric: snapshot.availablePhysicalBytes, description: "Includes standby, free, and zero pages" },
     { label: "Non-available physical", metric: snapshot.nonAvailablePhysicalBytes, description: "Derived total minus available" },
@@ -375,32 +1259,142 @@ function ExplorerPage({ frame }: { frame: TelemetryFrame }) {
     { label: "Processes", metric: snapshot.processCount, description: "System process count" },
     { label: "Threads", metric: snapshot.threadCount, description: "System thread count" }
   ];
+
   return (
     <div className="page-stack">
-      <PageTitle eyebrow="Memory Explorer" title="Every number has provenance." description="Inspect collection status, source, cadence, and availability. Missing sensors stay missing—MemFlux never fills gaps with guesses." side={<div className="capability-chip"><span className={`sensor-dot sensor-${snapshot.collectionStatus === "monitoring" ? "available" : "error"}`} /><span><small>Collector state</small><strong>{snapshot.collectionStatus}</strong></span></div>} />
+      <PageTitle
+        eyebrow="Performance Intelligence"
+        title="Every number has provenance."
+        description="Inspect CPU, WDDM GPU Engine attribution, memory counters, background contention, and non-injecting PresentMon frame capture."
+        side={
+          <div className="capability-chip">
+            <span className={`sensor-dot sensor-${snapshot.collectionStatus === "monitoring" ? "available" : "error"}`} />
+            <span><small>Collector state</small><strong>{snapshot.collectionStatus}</strong></span>
+          </div>
+        }
+      />
+
+      {gpu && gpu.availableAdapters.length > 0 && (
+        <section className="panel sensor-panel" style={{ marginBottom: 14 }}>
+          <div className="panel-heading">
+            <div>
+              <span className="eyebrow">WDDM GPU Attribution</span>
+              <h2>{gpu.selectedAdapter?.name ?? "GPU Adapter"}</h2>
+            </div>
+            <span className="sensor-caption">
+              Busiest engine summary (independent engines are never summed)
+            </span>
+          </div>
+          <div className="result-grid" style={{ marginTop: 12 }}>
+            <span>
+              <small>Dedicated VRAM</small>
+              <strong>{formatBytes(gpu.selectedAdapter?.dedicatedVideoMemoryBytes ?? null)}</strong>
+            </span>
+            <span>
+              <small>3D / Graphics Engine</small>
+              <strong>{formatPercent(gpu.engineBreakdown?.threeDPercent ?? null, 1)}</strong>
+            </span>
+            <span>
+              <small>Compute Engine</small>
+              <strong>{formatPercent(gpu.engineBreakdown?.computePercent ?? null, 1)}</strong>
+            </span>
+            <span>
+              <small>Copy / Decode / Encode</small>
+              <strong>
+                {formatPercent(gpu.engineBreakdown?.copyPercent ?? null, 1)} /{" "}
+                {formatPercent(gpu.engineBreakdown?.videoDecodePercent ?? null, 1)} /{" "}
+                {formatPercent(gpu.engineBreakdown?.videoEncodePercent ?? null, 1)}
+              </strong>
+            </span>
+          </div>
+        </section>
+      )}
+
+      <section className="panel sensor-panel" style={{ marginBottom: 14 }}>
+        <div className="panel-heading">
+          <div>
+            <span className="eyebrow">Non-injecting Frame Capture</span>
+            <h2>PresentMon FPS & Frame-Time Session</h2>
+          </div>
+          <span className={`availability-tag ${fps?.active ? "tag-available" : "tag-unavailable"}`}>
+            {fps?.active ? "Active Capture" : fps?.providerAvailable ? "Provider Ready" : "Provider Not Installed"}
+          </span>
+        </div>
+        <p className="panel-note" style={{ marginTop: 10 }}>
+          <Icon name="info" size={16} />
+          <span>{fps?.statusDetail ?? "No FPS capture active."}</span>
+        </p>
+        <div style={{ display: "flex", gap: 10, marginTop: 12, alignItems: "center", flexWrap: "wrap" }}>
+          <input
+            className="text-input"
+            placeholder="Target Process PID"
+            value={manualPid}
+            onChange={(e) => setManualPid(e.target.value)}
+          />
+          <input
+            className="text-input"
+            placeholder="Executable label"
+            value={manualExe}
+            onChange={(e) => setManualExe(e.target.value)}
+          />
+          <button
+            className="button button-primary"
+            disabled={!manualPid || !Number.isFinite(Number(manualPid))}
+            onClick={() => void onStartFpsCapture(Number(manualPid), manualExe)}
+          >
+            Start Capture
+          </button>
+          {fps?.active && (
+            <button className="button button-quiet" onClick={() => void onStopFpsCapture()}>
+              Stop Capture
+            </button>
+          )}
+        </div>
+      </section>
+
+      {competing.length > 0 && (
+        <section className="panel sensor-panel" style={{ marginBottom: 14 }}>
+          <div className="panel-heading">
+            <div>
+              <span className="eyebrow">Background Workload Intelligence</span>
+              <h2>Processes active during GameFocus session</h2>
+            </div>
+            <span className="sensor-caption">Read-only contention analysis</span>
+          </div>
+          <div className="sensor-table-wrap">
+            <table className="sensor-table">
+              <thead>
+                <tr>
+                  <th>Process</th>
+                  <th>CPU %</th>
+                  <th>GPU Engine %</th>
+                  <th>Working Set</th>
+                </tr>
+              </thead>
+              <tbody>
+                {competing.map((proc) => (
+                  <tr key={proc.pid}>
+                    <td>
+                      <div>
+                        <strong>{proc.executableName} (PID {proc.pid})</strong>
+                        <small>{proc.isProtected ? "Protected streaming/audio workload" : "Background process"}</small>
+                      </div>
+                    </td>
+                    <td className="sensor-value">{proc.cpuPercent.toFixed(1)}%</td>
+                    <td className="sensor-value">{proc.gpuPercent.toFixed(1)}%</td>
+                    <td className="sensor-value">{formatBytes(proc.workingSetBytes)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
+
       <section className="panel sensor-panel">
         <div className="panel-heading"><div><span className="eyebrow">Sensor registry</span><h2>Current native measurements</h2></div><span className="sensor-caption">Sample #{snapshot.sequence} • {formatTimestamp(snapshot.timestampMs)}</span></div>
         <div className="sensor-table-wrap"><table className="sensor-table"><thead><tr><th>Measurement</th><th>Value</th><th>Source</th><th>Status</th></tr></thead><tbody>{sensors.map((sensor) => <SensorRow key={sensor.metric.id} {...sensor} />)}</tbody></table></div>
       </section>
-      <section className="explainer-grid">
-        <article className="panel text-panel"><span className="eyebrow">Correctness note</span><h2>Available is not the same as empty</h2><p>Windows can quickly reuse standby cache. A large standby value can coexist with healthy headroom; clearing it merely to increase a “free” counter is not evidence of better performance.</p></article>
-        <article className="panel text-panel"><span className="eyebrow">OS pressure signal</span><h2>{snapshot.osMemoryState === "unavailable" ? "Signal unavailable" : `${snapshot.osMemoryState.charAt(0).toUpperCase()}${snapshot.osMemoryState.slice(1)} memory state`}</h2><p>The documented Windows resource notification is one input among several. Its neutral band is expected and never treated as an error.</p></article>
-      </section>
-    </div>
-  );
-}
-
-function GuardianPage({ frame, paused, onPause, capability }: { frame: TelemetryFrame; paused: boolean; onPause: () => void; capability: ActionCapability }) {
-  const decision = frame.guardian;
-  return (
-    <div className="page-stack">
-      <PageTitle eyebrow="Adaptive Guardian" title="Assessment and cleaning policy stay distinct." description="Guardian explains pressure and safeguards. Manual standby clearing remains under direct user control and reports its own native outcome." side={<button className={`button ${paused ? "button-primary" : "button-quiet"}`} onClick={onPause}><Icon name={paused ? "play" : "pause"} />{paused ? "Resume Guardian" : "Pause Guardian"}</button>} />
-      <GuardianPanel decision={decision} updated={frame.snapshot.timestampMs} />
-      <div className="guardian-grid">
-        <section className="panel evidence-panel"><div className="panel-heading"><div><span className="eyebrow">Decision trace</span><h2>Why Guardian chose {decision.outcome}</h2></div><code>{decision.reasonCode}</code></div><div className="evidence-list">{decision.evidence.length ? decision.evidence.map((item, index) => <div key={item}><span>{String(index + 1).padStart(2, "0")}</span><p>{item}</p></div>) : <div><span>—</span><p>No sensor evidence evaluated while paused.</p></div>}</div></section>
-        <section className="panel safeguards-panel"><span className="eyebrow">Action boundary</span><h2>Native cleaner capability</h2><div className="capability-warning"><Icon name="shield" /><div><strong>{capability.status}</strong><p>{capability.explanation}</p></div></div><ul className="check-list"><li><span>✓</span> Unelevated monitoring process</li><li><span>✓</span> One fixed elevated operation</li><li><span>✓</span> Serialized purge requests</li><li><span>✓</span> Native status separated from measured change</li></ul></section>
-      </div>
-      <section className="panel policy-strip"><div><span className="policy-index">01</span><span><strong>Measure</strong><small>Pre-action counters</small></span></div><i /><div><span className="policy-index">02</span><span><strong>Authorize</strong><small>Narrow Windows UAC helper</small></span></div><i /><div><span className="policy-index">03</span><span><strong>Execute</strong><small>Native standby purge</small></span></div><i /><div><span className="policy-index">04</span><span><strong>Verify</strong><small>Post-action counters</small></span></div></section>
     </div>
   );
 }
@@ -411,21 +1405,96 @@ function Toggle({ checked, onChange, label, description }: { checked: boolean; o
   );
 }
 
-function SettingsPage({ envelope, saving, onSave }: { envelope: SettingsEnvelope; saving: boolean; onSave: (settings: AppSettings) => Promise<void> }) {
+function SettingsPage({
+  envelope,
+  frame,
+  saving,
+  onSave
+}: {
+  envelope: SettingsEnvelope;
+  frame: TelemetryFrame | null;
+  saving: boolean;
+  onSave: (settings: AppSettings) => Promise<void>;
+}) {
   const [draft, setDraft] = useState(envelope.settings);
   const [saved, setSaved] = useState(false);
   useEffect(() => setDraft(envelope.settings), [envelope.settings]);
   const update = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => setDraft((current) => ({ ...current, [key]: value }));
   const changed = JSON.stringify(draft) !== JSON.stringify(envelope.settings);
   const submit = async () => { await onSave(draft); setSaved(true); window.setTimeout(() => setSaved(false), 1800); };
+  const adapters = frame?.gpuTelemetry?.availableAdapters ?? [];
+
   return (
     <div className="page-stack">
-      <PageTitle eyebrow="Settings" title="Quiet by default. Precise by choice." description="Tune monitoring behavior and presentation. Settings are validated by the native runtime and stored locally in a versioned file." side={<button className="button button-primary" disabled={!changed || saving} onClick={() => void submit()}>{saving ? "Saving…" : saved ? "Saved" : "Save changes"}</button>} />
+      <PageTitle eyebrow="Settings" title="Quiet by default. Precise by choice." description="Tune monitoring behavior, HUD metrics, GameFocus policies, and automatic standby cleaning. Validated and persisted atomically." side={<button className="button button-primary" disabled={!changed || saving} onClick={() => void submit()}>{saving ? "Saving…" : saved ? "Saved" : "Save changes"}</button>} />
       {envelope.warning && <div className="degraded-banner"><Icon name="info" /><span><strong>Safe defaults active</strong>{envelope.warning}</span></div>}
       <div className="settings-grid">
-        <section className="panel settings-section"><span className="eyebrow">Live telemetry</span><h2>Sidebar performance HUD</h2><Toggle checked={draft.performanceHudEnabled} onChange={(value) => update("performanceHudEnabled", value)} label="Show performance HUD" description="Real CPU and RAM at the monitoring cadence. CPU collection pauses when hidden or disabled. GPU and frame capture are not yet available." /></section>
-        <section className="panel settings-section"><span className="eyebrow">Cleaner timing</span><h2>Evaluation limits</h2><label className="select-row"><span><strong>Policy polling interval</strong><small>Evaluation follows available monitoring samples</small></span><select value={draft.cleanerPollIntervalMs} onChange={(event) => update("cleanerPollIntervalMs", Number(event.target.value))}><option value={1000}>1 second</option><option value={5000}>5 seconds</option><option value={10000}>10 seconds</option><option value={30000}>30 seconds</option><option value={60000}>60 seconds</option></select></label><label className="select-row"><span><strong>Minimum intervention interval</strong><small>Cooldown also applies</small></span><select value={draft.cleanerMinimumIntervalMs} onChange={(event) => update("cleanerMinimumIntervalMs", Number(event.target.value))}><option value={60000}>1 minute</option><option value={300000}>5 minutes</option><option value={600000}>10 minutes</option></select></label></section>
-        <section className="panel settings-section cleaner-settings"><span className="eyebrow">Standby cleaner</span><h2>Automatic threshold policy</h2><Toggle checked={draft.automaticCleaningEnabled} onChange={(value) => update("automaticCleaningEnabled", value)} label="Enable automatic evaluation" description="Opt in to standby plus Free & Zero threshold evaluation. Background triggers never open surprise UAC prompts." /><Toggle checked={draft.cleanerPaused} onChange={(value) => update("cleanerPaused", value)} label="Pause automatic cleaner" description="Pause cleaner policy independently while telemetry continues." /><label className="select-row"><span><strong>Standby threshold</strong><small>Both threshold conditions must be true</small></span><select value={draft.standbyThresholdBytes} onChange={(event) => update("standbyThresholdBytes", Number(event.target.value))}><option value={536870912}>512 MiB</option><option value={1073741824}>1 GiB</option><option value={2147483648}>2 GiB</option><option value={4294967296}>4 GiB</option></select></label><label className="select-row"><span><strong>Free & Zero threshold</strong><small>Not available physical memory</small></span><select value={draft.freeZeroThresholdBytes} onChange={(event) => update("freeZeroThresholdBytes", Number(event.target.value))}><option value={536870912}>512 MiB</option><option value={1073741824}>1 GiB</option><option value={2147483648}>2 GiB</option><option value={4294967296}>4 GiB</option></select></label><label className="select-row"><span><strong>Cooldown</strong><small>Minimum time after a completed purge</small></span><select value={draft.cleanerCooldownMs} onChange={(event) => update("cleanerCooldownMs", Number(event.target.value))}><option value={300000}>5 minutes</option><option value={600000}>10 minutes</option><option value={1800000}>30 minutes</option><option value={3600000}>1 hour</option></select></label><label className="select-row"><span><strong>Maximum frequency</strong><small>Completed purges per rolling hour</small></span><select value={draft.maximumPurgesPerHour} onChange={(event) => update("maximumPurgesPerHour", Number(event.target.value))}><option value={1}>1 per hour</option><option value={2}>2 per hour</option><option value={4}>4 per hour</option></select></label><label className="select-row exclusions-row"><span><strong>Excluded foreground apps</strong><small>Comma-separated executable names</small></span><input value={draft.cleanerExcludedApplications.join(", ")} onChange={(event) => update("cleanerExcludedApplications", event.target.value.split(",").map((value) => value.trim()).filter(Boolean))} placeholder="obs64.exe, game.exe" /></label><p className="settings-caveat">Policy configuration and safeguards are active foundations. Unattended native execution remains disabled until the explicitly authorized session helper is complete; manual purge remains available.</p></section>
+        <section className="panel settings-section">
+          <span className="eyebrow">Live telemetry</span>
+          <h2>Sidebar performance HUD</h2>
+          <Toggle checked={draft.performanceHudEnabled} onChange={(value) => update("performanceHudEnabled", value)} label="Show performance HUD" description="Display live CPU, GPU, RAM, FPS, and cleaner status in the sidebar. Suspends when hidden." />
+          <Toggle checked={draft.hudShowCpu ?? true} onChange={(value) => update("hudShowCpu", value)} label="Display CPU %" description="Overall CPU busy delta from GetSystemTimes." />
+          <Toggle checked={draft.hudShowGpu ?? true} onChange={(value) => update("hudShowGpu", value)} label="Display GPU %" description="Busiest WDDM GPU engine utilization for the selected adapter." />
+          <Toggle checked={draft.hudShowRam ?? true} onChange={(value) => update("hudShowRam", value)} label="Display RAM %" description="Physical memory load from GlobalMemoryStatusEx." />
+          <Toggle checked={draft.hudShowFps ?? true} onChange={(value) => update("hudShowFps", value)} label="Display FPS & Frame Time" description="Show measured FPS and frame duration when capture is active." />
+          <Toggle checked={draft.fpsCapturePermitted ?? false} onChange={(value) => update("fpsCapturePermitted", value)} label="Permit PresentMon FPS capture" description="Allow non-injecting ETW frame capture when requested." />
+          <label className="select-row">
+            <span><strong>Monitored GPU adapter</strong><small>Auto selects primary hardware GPU</small></span>
+            <select value={draft.hudSelectedGpu ?? "auto"} onChange={(e) => update("hudSelectedGpu", e.target.value)}>
+              <option value="auto">Automatic (Primary Hardware GPU)</option>
+              {adapters.map((a) => (
+                <option key={a.luidKey} value={a.luidKey}>{a.name} ({a.luidKey})</option>
+              ))}
+            </select>
+          </label>
+          <label className="select-row">
+            <span><strong>HUD detail level</strong><small>Show adapter attribution in sidebar</small></span>
+            <select value={draft.hudDetailLevel ?? "summary"} onChange={(e) => update("hudDetailLevel", e.target.value)}>
+              <option value="summary">Summary</option>
+              <option value="detailed">Detailed (Adapter + Engine)</option>
+            </select>
+          </label>
+        </section>
+
+        <section className="panel settings-section">
+          <span className="eyebrow">GameFocus & PowerShift</span>
+          <h2>Session & power safeguards</h2>
+          <Toggle checked={draft.gamefocusEnabled ?? true} onChange={(value) => update("gamefocusEnabled", value)} label="Enable GameFocus session detection" description="Monitor foreground processes for configured game profiles and candidate games." />
+          <Toggle checked={draft.gamefocusAutoDetect ?? true} onChange={(value) => update("gamefocusAutoDetect", value)} label="Auto-activate saved game profiles" description="Automatically start the matching GameFocus profile when a saved game enters focus." />
+          <Toggle checked={draft.powershiftAllowOnBattery ?? false} onChange={(value) => update("powershiftAllowOnBattery", value)} label="Allow high-power schemes on battery" description="Conservative by default: block Performance power schemes when running on DC battery." />
+          <label className="select-row">
+            <span><strong>Cleaner policy polling interval</strong><small>Independent monotonic scheduler cadence</small></span>
+            <select value={draft.cleanerPollIntervalMs} onChange={(event) => update("cleanerPollIntervalMs", Number(event.target.value))}>
+              <option value={1000}>1 second</option>
+              <option value={5000}>5 seconds</option>
+              <option value={10000}>10 seconds</option>
+              <option value={30000}>30 seconds</option>
+              <option value={60000}>60 seconds</option>
+            </select>
+          </label>
+          <label className="select-row">
+            <span><strong>Minimum intervention interval</strong><small>Cooldown also applies</small></span>
+            <select value={draft.cleanerMinimumIntervalMs} onChange={(event) => update("cleanerMinimumIntervalMs", Number(event.target.value))}>
+              <option value={60000}>1 minute</option>
+              <option value={300000}>5 minutes</option>
+              <option value={600000}>10 minutes</option>
+            </select>
+          </label>
+        </section>
+
+        <section className="panel settings-section cleaner-settings">
+          <span className="eyebrow">Standby cleaner</span>
+          <h2>Automatic threshold policy</h2>
+          <Toggle checked={draft.automaticCleaningEnabled} onChange={(value) => update("automaticCleaningEnabled", value)} label="Enable automatic evaluation" description="Opt in to standby plus Free & Zero threshold evaluation. Background triggers require an authorized session helper and never open surprise UAC prompts." />
+          <Toggle checked={draft.cleanerPaused} onChange={(value) => update("cleanerPaused", value)} label="Pause automatic cleaner" description="Pause cleaner policy independently while telemetry continues." />
+          <label className="select-row"><span><strong>Standby threshold</strong><small>Both threshold conditions must be true</small></span><select value={draft.standbyThresholdBytes} onChange={(event) => update("standbyThresholdBytes", Number(event.target.value))}><option value={536870912}>512 MiB</option><option value={1073741824}>1 GiB</option><option value={2147483648}>2 GiB</option><option value={4294967296}>4 GiB</option></select></label>
+          <label className="select-row"><span><strong>Free & Zero threshold</strong><small>Not available physical memory</small></span><select value={draft.freeZeroThresholdBytes} onChange={(event) => update("freeZeroThresholdBytes", Number(event.target.value))}><option value={536870912}>512 MiB</option><option value={1073741824}>1 GiB</option><option value={2147483648}>2 GiB</option><option value={4294967296}>4 GiB</option></select></label>
+          <label className="select-row"><span><strong>Cooldown</strong><small>Minimum time after a completed purge</small></span><select value={draft.cleanerCooldownMs} onChange={(event) => update("cleanerCooldownMs", Number(event.target.value))}><option value={300000}>5 minutes</option><option value={600000}>10 minutes</option><option value={1800000}>30 minutes</option><option value={3600000}>1 hour</option></select></label>
+          <label className="select-row"><span><strong>Maximum frequency</strong><small>Completed purges per rolling hour</small></span><select value={draft.maximumPurgesPerHour} onChange={(event) => update("maximumPurgesPerHour", Number(event.target.value))}><option value={1}>1 per hour</option><option value={2}>2 per hour</option><option value={4}>4 per hour</option><option value={6}>6 per hour</option></select></label>
+          <label className="select-row"><span><strong>Excluded foreground executables</strong><small>Comma-separated executable names or full paths</small></span><input value={draft.cleanerExcludedApplications.join(", ")} placeholder="game.exe, obs64.exe" onChange={(event) => update("cleanerExcludedApplications", event.target.value.split(",").map((item) => item.trim()).filter(Boolean))} /></label>
+          <p className="settings-caveat">Unattended native execution runs only while an explicitly authorized elevated session helper is active. MemFlux never triggers background UAC prompts during gameplay.</p>
+        </section>
+
         <section className="panel settings-section"><span className="eyebrow">Guardian & lifecycle</span><h2>Background behavior</h2><Toggle checked={draft.guardianEnabled} onChange={(value) => update("guardianEnabled", value)} label="Adaptive Guardian" description="Interpret memory pressure separately from manual cleaning." /><Toggle checked={draft.closeToTray} onChange={(value) => update("closeToTray", value)} label="Close to system tray" description="Keep the collector running when the dashboard closes." /></section>
         <section className="panel settings-section"><span className="eyebrow">Sampling policy</span><h2>Monitoring cadence</h2><label className="select-row"><span><strong>Dashboard visible</strong><small>Faster feedback while you are looking</small></span><select value={draft.foregroundIntervalMs} onChange={(event) => update("foregroundIntervalMs", Number(event.target.value))}><option value={500}>0.5 seconds</option><option value={1000}>1 second</option><option value={2000}>2 seconds</option><option value={5000}>5 seconds</option></select></label><label className="select-row"><span><strong>Dashboard hidden</strong><small>Lower-overhead background cadence</small></span><select value={draft.backgroundIntervalMs} onChange={(event) => update("backgroundIntervalMs", Number(event.target.value))}><option value={2000}>2 seconds</option><option value={5000}>5 seconds</option><option value={10000}>10 seconds</option><option value={30000}>30 seconds</option></select></label></section>
         <section className="panel settings-section"><span className="eyebrow">Appearance</span><h2>Interface comfort</h2><Toggle checked={draft.reducedMotion} onChange={(value) => update("reducedMotion", value)} label="Reduced motion" description="Suppress non-essential transitions and ambient movement." /><Toggle checked={draft.compactDensity} onChange={(value) => update("compactDensity", value)} label="Compact density" description="Tighten cards and tables for information-dense windows." /></section>
@@ -441,31 +1510,166 @@ function UnavailablePanel({ title, detail }: { title: string; detail: string }) 
 
 export default function App() {
   const [page, setPage] = useState<PageId>("overview");
-  const { frame, history, settingsEnvelope, runtime, error, saving, purging, actionHistory, setPaused, saveSettings, purgeStandby } = useMemFlux();
+  const {
+    frame,
+    history,
+    settingsEnvelope,
+    runtime,
+    error,
+    saving,
+    purging,
+    authorizingSession,
+    actionHistory,
+    setPaused,
+    saveSettings,
+    purgeStandby,
+    authorizeCleanerSession,
+    revokeCleanerSession,
+    applyPowerShift,
+    restoreRewindEntry,
+    restoreAllRewind,
+    activateGameFocus,
+    deactivateGameFocus,
+    startFpsCapture,
+    stopFpsCapture
+  } = useMemFlux();
   const paused = runtime?.paused ?? false;
   const reducedMotion = settingsEnvelope?.settings.reducedMotion ?? false;
   const compactDensity = settingsEnvelope?.settings.compactDensity ?? false;
+  const showOnboarding = settingsEnvelope ? !settingsEnvelope.settings.onboardingCompleted : false;
 
   useEffect(() => {
     document.documentElement.dataset.motion = reducedMotion ? "reduced" : "full";
     document.documentElement.dataset.density = compactDensity ? "compact" : "comfortable";
   }, [reducedMotion, compactDensity]);
 
+  const capability =
+    runtime?.actionCapability ??
+    ({
+      status: "unverified",
+      compatibilityStatus: "unverified",
+      supported: false,
+      requiresElevation: false,
+      privilegeState: "not_evaluated",
+      mechanismAvailable: false,
+      osBuild: null,
+      mechanism: "Unavailable",
+      explanation: "Capability detection has not completed."
+    } satisfies ActionCapability);
+
+  const dismissOnboarding = () => {
+    if (!settingsEnvelope) return;
+    void saveSettings({
+      ...settingsEnvelope.settings,
+      onboardingCompleted: true
+    });
+  };
+
   const content = useMemo(() => {
     if (!frame && page !== "settings") return <LoadingView />;
-    if (page === "settings") return settingsEnvelope ? <SettingsPage envelope={settingsEnvelope} saving={saving} onSave={saveSettings} /> : <LoadingView />;
+    if (page === "settings")
+      return settingsEnvelope ? (
+        <SettingsPage envelope={settingsEnvelope} frame={frame} saving={saving} onSave={saveSettings} />
+      ) : (
+        <LoadingView />
+      );
     if (!frame) return <LoadingView />;
-    if (page === "explorer") return <ExplorerPage frame={frame} />;
-    const capability = runtime?.actionCapability ?? { status: "unverified", compatibilityStatus: "unverified", supported: false, requiresElevation: false, privilegeState: "not_evaluated", mechanismAvailable: false, osBuild: null, mechanism: "Unavailable", explanation: "Capability detection has not completed." } satisfies ActionCapability;
-    if (page === "guardian") return <GuardianPage frame={frame} paused={paused} onPause={() => void setPaused(!paused)} capability={capability} />;
-    return <OverviewPage frame={frame} history={history} capability={capability} actions={actionHistory} purging={purging} onPurge={() => void purgeStandby()} />;
-  }, [frame, page, history, settingsEnvelope, saving, saveSettings, paused, setPaused, runtime?.actionCapability, actionHistory, purging, purgeStandby]);
+    if (page === "intelligence")
+      return (
+        <IntelligencePage
+          frame={frame}
+          onStartFpsCapture={startFpsCapture}
+          onStopFpsCapture={stopFpsCapture}
+        />
+      );
+    if (page === "performance")
+      return settingsEnvelope ? (
+        <PerformanceControlPage
+          frame={frame}
+          settings={settingsEnvelope.settings}
+          onSaveSettings={saveSettings}
+          onApplyPowerShift={applyPowerShift}
+          onRestoreRewindEntry={restoreRewindEntry}
+          onRestoreAllRewind={restoreAllRewind}
+          onActivateGameFocus={activateGameFocus}
+          onDeactivateGameFocus={deactivateGameFocus}
+          onStartFpsCapture={startFpsCapture}
+          onStopFpsCapture={stopFpsCapture}
+        />
+      ) : (
+        <LoadingView />
+      );
+    if (page === "memory")
+      return (
+        <MemoryControlPage
+          frame={frame}
+          paused={paused}
+          onPause={() => void setPaused(!paused)}
+          capability={capability}
+          runtime={runtime}
+          actions={actionHistory}
+          purging={purging}
+          authorizingSession={authorizingSession}
+          onPurge={() => void purgeStandby()}
+          onAuthorizeSession={() => void authorizeCleanerSession()}
+          onRevokeSession={() => void revokeCleanerSession()}
+        />
+      );
+    return (
+      <OverviewPage
+        frame={frame}
+        history={history}
+        capability={capability}
+        runtime={runtime}
+        actions={actionHistory}
+        purging={purging}
+        authorizingSession={authorizingSession}
+        showOnboarding={showOnboarding}
+        onDismissOnboarding={dismissOnboarding}
+        onPurge={() => void purgeStandby()}
+        onAuthorizeSession={() => void authorizeCleanerSession()}
+        onRevokeSession={() => void revokeCleanerSession()}
+        onNavigate={setPage}
+      />
+    );
+  }, [
+    frame,
+    page,
+    history,
+    settingsEnvelope,
+    saving,
+    saveSettings,
+    paused,
+    setPaused,
+    capability,
+    runtime,
+    actionHistory,
+    purging,
+    authorizingSession,
+    showOnboarding,
+    purgeStandby,
+    authorizeCleanerSession,
+    revokeCleanerSession,
+    applyPowerShift,
+    restoreRewindEntry,
+    restoreAllRewind,
+    activateGameFocus,
+    deactivateGameFocus,
+    startFpsCapture,
+    stopFpsCapture
+  ]);
 
   return (
-    <AppShell page={page} onPage={setPage} frame={frame} paused={paused} onPause={() => void setPaused(!paused)} hudEnabled={settingsEnvelope?.settings.performanceHudEnabled ?? true}>
+    <AppShell
+      page={page}
+      onPage={setPage}
+      frame={frame}
+      paused={paused}
+      onPause={() => void setPaused(!paused)}
+      settings={settingsEnvelope?.settings}
+    >
       {error && <ErrorBanner message={error} />}
       {content}
     </AppShell>
   );
 }
-

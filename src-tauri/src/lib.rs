@@ -1,7 +1,11 @@
 mod action;
 mod cleaner;
+mod coordinator;
+mod gamefocus;
 mod guardian;
 mod performance;
+mod powershift;
+mod rewind;
 mod settings;
 mod telemetry;
 

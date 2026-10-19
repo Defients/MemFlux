@@ -2,66 +2,40 @@
 
 ## Status
 
-Monitoring, manual cleaning, deterministic automatic policy evaluation, and persistent bounded action history are implemented. Unattended automatic authorization and native execution remain incomplete.
+V4.1 Core Completion implemented: standard-user monitoring (memory, CPU, DXGI/WDDM GPU, optional non-injecting PresentMon FPS), manual and session-authorized automatic standby cleaning, independent monotonic cleaner scheduling, durable quota accounting, Optimization Rewind journal, PowerShift Win32 power-scheme control, GameFocus session management, and Central Optimization Coordinator.
 
 ## Process model
 
-MemFlux is a standard-user Tauri 2 desktop application. React renders the dashboard in WebView2 while one Rust background thread owns Windows collection and Guardian evaluation. Manual purging launches the same executable as a one-shot elevated helper with one exact argument. There is no service, driver, local server, or elevated main process.
+MemFlux is a standard-user Tauri 2 desktop application. React renders the Midnight CosmoTech™ interface in WebView2 while two coordinated Rust background threads (`memflux-telemetry` and `memflux-cleaner`) own native Windows collection, GameFocus/PowerShift coordination, and cleaner policy evaluation.
+
+- Manual purging launches the same executable in a one-shot helper mode (`--memflux-elevated-purge-standby`) or uses an already active authenticated session helper.
+- Unattended automatic purging uses an explicitly authorized elevated session helper (`--memflux-elevated-session-helper`) communicating over a local Windows Named Pipe with restrictive SDDL permissions, `PIPE_REJECT_REMOTE_CLIENTS`, verified peer PID and executable image path, and a parent-process `SYNCHRONIZE` watchdog that terminates the helper immediately if the controller exits or crashes.
 
 ```text
-Win32 + PDH
+Win32 Memory + PDH + GetSystemTimes + DXGI/WDDM GPU + PowrProf
     ↓
-PlatformCollector (Rust)
+memflux-telemetry thread (Rust)
     ↓
-MemorySnapshot with per-metric provenance
+MemorySnapshot + CpuSensor + GpuSensor + OptimizationCoordinator (GameFocus / PowerShift / Rewind)
     ↓
-GuardianEvaluator (deterministic pressure assessment)
-    ↓
-TelemetryFrame cached in native state and emitted to the main window
-    ↓
-React views and bounded in-memory trend history
+TelemetryFrame cached in native state and emitted to visible main window
 
-Manual command → serialize → pre-snapshot → fixed UAC helper → NTSTATUS → 750 ms settle → post-snapshot → bounded action history
+memflux-cleaner thread (independent monotonic Instant scheduler)
+    ↓
+CleanerPolicy + durable cleaner-quota.json + foreground exclusion check
+    ↓
+Authenticated Named Pipe Session Helper → NtSetSystemInformation(80, 4) → 750 ms settle → ActionHistory
 ```
 
 ## Modules
 
-- `src-tauri/src/performance.rs`: CPU counter delta validation and standard-user foreground executable observation. CPU metric travels in the shared TelemetryFrame; no separate HUD collector thread.
-- `src/components/PerformanceHud.tsx`: CPU/RAM sidebar presentation, explicit missing GPU/capture values, stale detection and compact disclosure. Schema-3 settings persist visibility.
-
-- `src-tauri/src/telemetry`: cross-platform contract and Windows adapter. Optional counters fail independently.
-- `src-tauri/src/action.rs`: build capability, exact privilege enablement, native call, and fixed one-shot elevated helper.
-- `src-tauri/src/guardian.rs`: deterministic pressure classifier, hysteresis, explanations, and tests.
-- `src-tauri/src/settings.rs`: schema version 2, monitoring/cleaner validation, safe defaults, and atomic Windows replacement.
-- `src-tauri/src/cleaner.rs`: direct standby/Free & Zero threshold policy, cooldown, hourly limits, exclusion matching and authorization gating, separate from Guardian.
-- `src-tauri/src/app.rs`: lifecycle, commands, native state, sampler, tray, and single-instance policy.
-- `src/hooks/useMemFlux.ts`: typed event/command bridge with bounded 90-sample UI history.
-- `src/App.tsx`: Overview, Memory Explorer, Adaptive Guardian, and Settings vertical slice.
-- `src/styles.css`: semantic Midnight CosmoTech™ tokens and responsive/accessibility states.
-
-## Concurrency and lifecycle
-
-- The collector is created and used only on the named `memflux-telemetry` thread.
-- A condition variable waits between samples; settings, pause, resume, and shutdown wake it. There is no busy-wait loop.
-- The cadence is selected from validated settings based on main-window visibility.
-- The latest complete frame is held in a read/write lock for initial UI hydration.
-- Hidden windows receive no recurring telemetry events. The native sampler continues and Open dashboard emits the cached frame.
-- Helper transport results are typed separately from native status. Timeout retains a process handle; a new purge is blocked until the previous helper is signaled. A launched helper with no observable handle blocks further launches for the process lifetime. No helper is forcibly terminated.
-- The pending-helper guard is process-local. Parent exit does not terminate an already launched one-shot helper; cross-restart reconciliation remains unimplemented.
-- History mutation and atomic persistence share the same lock to prevent concurrent writes or stale replacement.
-- Guardian state is reset while paused, preventing old consecutive samples from carrying across a pause.
-- Close hides to tray only when configured. Tray Exit sets shutdown and exits. Single-instance launch focuses the existing window.
-
-## Trust boundaries
-
-- React can invoke only explicit Tauri commands with typed JSON arguments.
-- The native runtime validates and persists settings.
-- The only privileged command is a fixed standby-list purge. The helper accepts no path, payload, threshold, shell text, or arbitrary operation.
-- Tauri capabilities grant only `core:default` to the main window.
-
-## Data model
-
-Every metric contains an identifier, optional value, unit, source, timestamp, sampling interval, status, and optional detail. A missing or warming sensor is never represented as numeric zero.
-
-The frontend keeps at most 90 telemetry frames in memory. Action records persist across restarts in `action-history.json` at the fixed application config directory, bounded to 100 records. Post-action measurement absence is distinct from an observed reduction of zero.
-
+- `src-tauri/src/action.rs`: build capability & compatibility matrix, `SeProfileSingleProcessPrivilege` enablement, `NtSetSystemInformation(80, 4)` call, one-shot UAC helper, and authenticated Named Pipe session helper.
+- `src-tauri/src/cleaner.rs`: dual-threshold policy (`standby >= threshold && free_zero <= threshold`), monotonic + persistent quota ledger, exclusion matching, temporary GameFocus session overrides, and truthful status summaries.
+- `src-tauri/src/performance.rs`: `GetSystemTimes` CPU sensor, DXGI adapter discovery, WDDM `\GPU Engine(*)\Utilization Percentage` busiest-engine and per-PID aggregator, foreground window/process inspector, and non-injecting PresentMon ETW capture controller.
+- `src-tauri/src/rewind.rs`: versioned atomic `rewind-journal.json` with compare-before-restore conflict detection and startup crash recovery.
+- `src-tauri/src/powershift.rs`: documented Win32 `PowerEnumerate`, `PowerGetActiveScheme`, `PowerSetActiveScheme`, `PowerReadFriendlyName`, and `GetSystemPowerStatus` controller.
+- `src-tauri/src/gamefocus.rs`: conservative game identification, presets/profiles, Alt+Tab debounced session lifecycle, streaming workload protection, and background process contention analyzer.
+- `src-tauri/src/coordinator.rs`: Central Optimization Coordinator serializing GameFocus, PowerShift, Rewind, and cleaner overrides.
+- `src-tauri/src/guardian.rs`: diagnostic pressure classifier with 3-sample hysteresis, independent of cleaner execution.
+- `src-tauri/src/settings.rs`: schema-v4 validated settings with atomic `MoveFileExW` replacement.
+- `src-tauri/src/app.rs`: Tauri commands, state management, tray lifecycle, single-instance policy, and background threads.

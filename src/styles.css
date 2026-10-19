@@ -346,6 +346,27 @@ button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px s
 .unavailable-panel h2 { margin: 0; color: var(--text-primary); font-size: 15px; }
 .unavailable-panel p { margin: 5px 0 0; font-size: 10px; }
 
+.session-auth-box { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 14px; padding: 12px 14px; border: 1px solid var(--border-subtle); border-radius: 10px; background: rgba(8, 7, 18, .38); }
+.session-auth-box strong, .session-auth-box small { display: block; }
+.session-auth-box strong { font-size: 9.5px; color: var(--text-primary); }
+.session-auth-box small { margin-top: 3px; font-size: 8px; color: var(--text-muted); line-height: 1.45; }
+.session-auth-box .quota-meta { color: var(--accent-secondary); font-variant-numeric: tabular-nums; }
+.session-auth-actions { display: flex; flex: 0 0 auto; gap: 8px; }
+
+.overview-session-strip { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 14px 0; padding: 15px 20px; }
+.overview-session-strip strong, .overview-session-strip small { display: block; }
+.overview-session-strip strong { margin: 4px 0 3px; font-size: 12px; }
+.overview-session-strip small { color: var(--text-muted); font-size: 9px; }
+
+.onboarding-panel { margin-bottom: 16px; padding: 20px; border-color: rgba(120, 190, 255, .34); }
+.onboarding-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-top: 16px; }
+.onboarding-step { display: flex; gap: 11px; padding: 12px; border: 1px solid rgba(52, 45, 78, .65); border-radius: 11px; background: rgba(8, 7, 18, .32); }
+.onboarding-step strong { display: block; font-size: 10.5px; margin-bottom: 4px; }
+.onboarding-step p { margin: 0; color: var(--text-secondary); font-size: 9px; line-height: 1.5; }
+
+.text-input { min-width: 170px; padding: 8px 11px; border: 1px solid var(--border-subtle); border-radius: 8px; background: rgba(8, 7, 18, .55); color: var(--text-primary); font: inherit; font-size: 9.5px; }
+.profile-creator select { padding: 8px 11px; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--surface-raised); color: var(--text-primary); font-size: 9.5px; }
+
 html[data-density="compact"] .page-stack { padding-top: 20px; }
 html[data-density="compact"] .metric-card { padding-top: 11px; padding-bottom: 10px; }
 html[data-density="compact"] .overview-hero > * { min-height: 195px; }

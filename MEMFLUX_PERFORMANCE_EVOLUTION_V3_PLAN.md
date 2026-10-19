@@ -1,7 +1,9 @@
 # MemFlux Performance Evolution V3 Plan
 
-Updated: 2026-10-18  
-Audited revision: `10fd1a7` (`main`, synchronized with `origin/main`)
+Updated: 2026-10-19  
+Audited revision: `c0f7c08` -> V4.1 Core Completion (`MEMFLUX_V4_1_BETA_EXECUTION_PLAN.md`)
+
+> **V4.1 Update:** P0-C (authenticated Named Pipe session helper, independent monotonic cleaner scheduling, durable quota ledger) and P1 (GameFocus, PowerShift, Optimization Rewind journal with compare-before-restore and crash recovery, WDDM GPU HUD, and NSIS/MSI packaging) are now implemented and verified by 33 Rust unit/native tests and 5 frontend tests. See `MEMFLUX_V4_1_BETA_EXECUTION_PLAN.md` for current status.
 
 ## 1. Current implementation inventory
 

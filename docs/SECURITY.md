@@ -1,35 +1,26 @@
 # Security and Privacy
 
-## Cleaner threat boundary
+## Threat boundary
 
-MemFlux monitors local Windows memory state and can request one full standby-list purge. It does not trim process working sets, manipulate timers, contact a network service, or accept untrusted remote input.
+MemFlux monitors local Windows memory, CPU, GPU, and power state, performs privilege-gated standby-list purging, and applies reversible Windows PowrProf power-scheme changes. It does not install kernel drivers, inject into game processes, weaken Windows Defender/HVCI/firewall settings, or upload analytics.
 
 ## Implemented controls
 
-- Standard-user main process; no requested-execution-level elevation.
-- One-shot UAC launch of the same executable with exactly `--memflux-elevated-purge-standby`.
-- Helper accepts no arbitrary command or filesystem path, enables only `SeProfileSingleProcessPrivilege`, performs one native request, and returns raw `NTSTATUS` as its process exit code.
-- Helper launch, UAC cancellation, wait timeout/failure, exit-code retrieval, native status, and measurement are represented separately. A wait timeout carries no `NTSTATUS`, does not claim success, and warns that the helper may finish later.
-- No service, kernel driver, scheduled task, registry tweak, or privileged helper.
-- No arbitrary shell, process, filesystem, HTTP, or updater capability.
-- Tauri main-window capability is limited to `core:default`.
-- Explicit native commands accept only settings, pause state, or read requests.
-- Settings and bounded action history use fixed app-config paths, schema/version checks, numeric range validation, safe defaults, and atomic replacement.
-- Invalid settings remain preserved for diagnosis and are not silently overwritten at startup.
-- Logs describe application state and native failures; they do not intentionally record secrets or process contents.
-- No account, analytics, or uploaded telemetry.
+- **Standard-user main process:** The UI and telemetry runtime run unelevated.
+- **One-shot manual helper:** Launches the current executable with `--memflux-elevated-purge-standby`, enables only `SeProfileSingleProcessPrivilege`, executes `NtSetSystemInformation(80, 4)`, and exits with raw `NTSTATUS`.
+- **Authenticated elevated session helper:**
+  - Requires explicit user UAC approval (`authorize_cleaner_session`). Background threshold triggers never initiate UAC prompts.
+  - Creates a local Windows Named Pipe (`\\.\pipe\MemFluxSession_<pid>_<timestamp>`) with `FILE_FLAG_FIRST_PIPE_INSTANCE`, `PIPE_REJECT_REMOTE_CLIENTS`, `nMaxInstances = 1`, and an SDDL DACL restricted to `SYSTEM`, `Builtin Administrators`, and the launching user's SID.
+  - Verifies peer identity on both ends using `GetNamedPipeClientProcessId` / `GetNamedPipeServerProcessId` and confirms via `QueryFullProcessImageNameW` that the peer process image matches the current executable.
+  - Accepts only versioned, length-bounded (`<= 2048` bytes) JSON requests (`#[serde(deny_unknown_fields)]`) for three enumerated operations: `Ping`, `PurgeStandbyList`, and `Shutdown`.
+  - Runs a dedicated watchdog thread holding a `SYNCHRONIZE` handle to the controller process (`WaitForSingleObject`), ensuring the helper exits immediately if the main application crashes or terminates, and enforces a 4-hour maximum session lifetime.
+- **Optimization Rewind safety:**
+  - Every PowerShift mutation is recorded in `rewind-journal.json` before execution and verified via `PowerGetActiveScheme` after execution.
+  - Compare-before-restore checks live Windows state before restoring; if the user externally changed the power scheme while a session was active, MemFlux preserves the user's external choice and logs `conflict_skipped`.
+  - Startup crash recovery inspects `rewind-journal.json` and safely restores any leftover active session state.
+- **Local-first storage:** Settings, action history, cleaner quota, and rewind journal use fixed application config paths and atomic `MoveFileExW` replacement. No telemetry or analytics leave the machine.
 
-## Compatibility controls
+## Remaining security & release considerations
 
-The private memory-list class/command is enabled only on an explicit tested-build allowlist. Missing export, unlisted build, invalid telemetry, a concurrent action, elevation denial, missing privilege, timeout, and failed `NTSTATUS` each produce distinct non-success outcomes.
-
-The following remain prohibited: kernel drivers, security-feature disabling, command execution from frontend input, arbitrary filesystem access by an elevated helper, insecure deserialization, process injection, game/anti-cheat tampering, and fabricated success.
-
-## Known gaps
-
-- Installer signing and update authenticity are not implemented.
-- Log retention policy needs validation before beta.
-- A dedicated penetration/security review has not occurred.
-- Controlled UAC-denial and helper-timeout paths still need native interaction testing.
-- Automatic native execution is disabled until an explicitly authorized session helper with authenticated, fixed-operation IPC is implemented and reviewed. Background policy evaluation never opens UAC.
-
+- **Code signing:** Build artifacts produced without a signing certificate are explicitly labeled unsigned development/beta artifacts and will trigger Windows SmartScreen prompts until signed with a trusted publisher certificate.
+- **Windows build allowlist:** Private memory-list purging (`NtSetSystemInformation` class 80, command 4) remains gated behind `SUPPORTED_BUILDS` (`[26340]`) until controlled runtime qualification is recorded on additional target Windows 10/11 builds.

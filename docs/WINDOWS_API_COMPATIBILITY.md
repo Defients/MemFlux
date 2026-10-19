@@ -8,54 +8,25 @@
 | Commit, physical pages, process/thread counts | `GetPerformanceInfo` | Documented, Windows XP+ desktop | Standard user | Implemented with commit fallback |
 | Low/high system memory condition | `CreateMemoryResourceNotification`, `QueryMemoryResourceNotification` | Documented, Windows XP+ desktop | Standard user | Implemented; neutral band supported |
 | Standby/free/modified/page-read counters | PDH with `PdhAddEnglishCounterW` | Documented interface; counters can be absent | Standard user normally | Implemented with independent availability |
-| Full standby-list clearing | `NtSetSystemInformation(80, command 4)` | `NtSetSystemInformation` is documented as an ntdll export; class 80 and command 4 are private/compatibility-sensitive | `SeProfileSingleProcessPrivilege`; current filtered token does not hold it | Implemented behind build allowlist with one-shot UAC helper |
-| Helper completion wait | `WaitForSingleObject` | Documented Win32 synchronization result | Standard user | Typed separately; `WAIT_TIMEOUT` is never treated as `NTSTATUS` and does not terminate the helper |
-| Helper exit result | `GetExitCodeProcess` after signaled wait | Documented process API | Query right on returned handle | Fixed helper exit value becomes native status only after confirmed completion |
-| Low-priority standby clearing | Command 5 in public native-header research | Not independently validated here | Same privilege boundary expected | Not exposed |
-| Process working-set trimming | `EmptyWorkingSet` | Documented, but not standby clearing | Target process rights | Not used |
-| Timer-period request | `timeBeginPeriod` / `timeEndPeriod` | Documented, modern process-scoped semantics | Standard user | Planned research only; disabled |
+| Full standby-list clearing | `NtSetSystemInformation(80, command 4)` | `NtSetSystemInformation` is documented as an ntdll export; class 80 and command 4 are private/compatibility-sensitive | `SeProfileSingleProcessPrivilege` | Implemented behind build allowlist with one-shot helper + authenticated Named Pipe session helper |
+| Session helper IPC & peer identity | `CreateNamedPipeW`, `GetNamedPipeClientProcessId`, `GetNamedPipeServerProcessId`, SDDL DACL | Documented Win32 Pipes & Security APIs | Standard user client / Elevated server | Implemented and verified on build 26340 |
+| CPU utilization | `GetSystemTimes` delta | Documented Win32 API | Standard user | Implemented (`(kernel + user - idle) / (kernel + user)`) |
+| GPU adapter discovery | DXGI `CreateDXGIFactory1` / `IDXGIFactory1::EnumAdapters1` | Documented DXGI 1.1+ API | Standard user | Implemented and verified (`NVIDIA GeForce RTX 4060 Ti`) |
+| GPU engine utilization | PDH `\GPU Engine(*)\Utilization Percentage` (`PdhGetFormattedCounterArrayW`) | Documented WDDM 2.0+ performance counter | Standard user | Implemented; sums per-PID on same physical engine and reports busiest engine |
+| Power scheme enumeration & control | `PowerEnumerate`, `PowerGetActiveScheme`, `PowerSetActiveScheme`, `PowerReadFriendlyName`, `GetSystemPowerStatus` | Documented Win32 PowrProf APIs | Standard user | Implemented with Optimization Rewind journal and compare-before-restore |
+| Non-injecting frame capture | External Intel PresentMon ETW process | Requires installed PresentMon binary + ETW privileges | Standard/Performance Log Users | Implemented adapter; reports explicit Unavailable when PresentMon binary is absent |
 
 ## Tested configuration
 
-- Windows 11 Home Insider Preview 10.0.26340, x64.
-- Standard-user monitoring intent; no application manifest requests elevation.
-- Windows SDK 10.0.26100.0 and WebView2 155.0.4283.62 present on the build host.
-- Local Performance Counter probing confirmed every Phase 1 PDH path before implementation.
-- Full standby purge runtime result: `STATUS_SUCCESS (0x00000000)`. Retained sample: standby 233,820,160 → 25,538,560 bytes; Free & Zero 10,254,319,616 → 10,510,528,512 bytes after 750 ms.
-- Unelevated helper result: `STATUS_PRIVILEGE_NOT_HELD (0xC0000061)`.
+- **Host:** Windows 11 Home Insider Preview `10.0.26340.9750`, x64, NVIDIA GeForce RTX 4060 Ti (`LUID 0x00000000_0x00017a11`).
+- **Standby purge:**
+  - Elevated helper result: `STATUS_SUCCESS (0x00000000)`. Retained sample: standby `233,820,160 → 25,538,560` bytes; Free & Zero `10,254,319,616 → 10,510,528,512` bytes after 750 ms.
+  - Unelevated helper result: `STATUS_PRIVILEGE_NOT_HELD (0xC0000061)`.
+- **Authenticated Named Pipe Session Helper:**
+  - Verified SDDL security descriptor creation, `PIPE_REJECT_REMOTE_CLIENTS`, `GetNamedPipeClientProcessId` / `GetNamedPipeServerProcessId` matching, executable image verification, `Ping`, `PurgeStandbyList`, and `Shutdown` round-trip.
+- **DXGI + WDDM GPU Engine:**
+  - Verified adapter enumeration (`NVIDIA GeForce RTX 4060 Ti`, 8 GiB dedicated VRAM) and live two-sample PDH `\GPU Engine(*)\Utilization Percentage` collection.
+- **PowerShift + Optimization Rewind:**
+  - Verified enumeration of `Balanced` (`381b4222-f694-41f0-9685-ff5bb260df2e`), `High performance` (`8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c`), and `Power saver` (`a1841308-3541-4fab-bc81-f71556f20b4a`), live `PowerSetActiveScheme` switch + `PowerGetActiveScheme` verification, and exact restoration to the original scheme via `RewindJournal`.
 
-This host is not representative of stable Windows 10/11 releases. The action allowlist currently contains only build 26340; compile or runtime success here is not generalized.
-
-Capability reporting distinguishes confirmed supported, confirmed unsupported, unverified, privilege unavailable, and mechanism unavailable. An unlisted build remains unverified and action-disabled even if the export is present.
-
-## Fallbacks
-
-- `GlobalMemoryStatusEx` is core. If it fails, the snapshot is Error and policy evaluation suspends.
-- If `GetPerformanceInfo` fails, commit values fall back to `MEMORYSTATUSEX` while process/thread counts remain unavailable.
-- Standby total is shown only when all three standby-class counters are valid; partial sums are rejected.
-- A rate counter reports Warming Up until two PDH collections exist.
-- Resource notification failures produce an Unavailable OS signal without inventing Low, High, or Neutral.
-
-## Authoritative references
-
-V4 read-only additions: GetSystemTimes supplies CPU counter deltas (kernel includes idle); overall CPU is unavailable on multi-group systems pending broader aggregation. Foreground exclusions use GetForegroundWindow → GetWindowThreadProcessId → OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION) → QueryFullProcessImageNameW, then recheck foreground ownership. Access failure or focus change returns unknown. Neither API path elevates or modifies the inspected process.
-
-- [GetSystemTimes and processor-group limitations](https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-getsystemtimes)
-- [GetWindowThreadProcessId](https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-getwindowthreadprocessid)
-- [QueryFullProcessImageNameW](https://learn.microsoft.com/windows/win32/api/winbase/nf-winbase-queryfullprocessimagenamew)
-
-- [GlobalMemoryStatusEx](https://learn.microsoft.com/windows/win32/api/sysinfoapi/nf-sysinfoapi-globalmemorystatusex)
-- [GetPerformanceInfo](https://learn.microsoft.com/windows/win32/api/psapi/nf-psapi-getperformanceinfo)
-- [CreateMemoryResourceNotification](https://learn.microsoft.com/windows/win32/api/memoryapi/nf-memoryapi-creatememoryresourcenotification)
-- [QueryMemoryResourceNotification](https://learn.microsoft.com/windows/win32/api/memoryapi/nf-memoryapi-querymemoryresourcenotification)
-- [NtQuerySystemInformation limitations](https://learn.microsoft.com/windows/win32/api/winternl/nf-winternl-ntquerysysteminformation)
-- [NtSetSystemInformation](https://learn.microsoft.com/windows/win32/sysinfo/ntsetsysteminformation)
-- [AdjustTokenPrivileges](https://learn.microsoft.com/windows/win32/api/securitybaseapi/nf-securitybaseapi-adjusttokenprivileges)
-- [ShellExecuteEx / `runas`](https://learn.microsoft.com/windows/win32/api/shellapi/ns-shellapi-shellexecuteinfow)
-- [WaitForSingleObject](https://learn.microsoft.com/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject)
-- [GetExitCodeProcess](https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-getexitcodeprocess)
-- [System Informer native header: class 80 and memory-list commands](https://github.com/winsiderss/phnt/blob/master/ntexapi.h)
-- [RAMMap](https://learn.microsoft.com/sysinternals/downloads/rammap)
-- [EmptyWorkingSet](https://learn.microsoft.com/windows/win32/api/psapi/nf-psapi-emptyworkingset)
-- [timeBeginPeriod](https://learn.microsoft.com/windows/win32/api/timeapi/nf-timeapi-timebeginperiod)
-
+Stable Windows 10 (`19045`) and Windows 11 (`22631`, `26100`) builds remain marked `unverified` in the compatibility matrix until controlled runtime tests are executed on those hosts.

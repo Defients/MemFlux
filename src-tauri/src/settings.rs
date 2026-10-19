@@ -1,9 +1,10 @@
+use crate::gamefocus::GameProfile;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-pub const SETTINGS_SCHEMA_VERSION: u32 = 3;
+pub const SETTINGS_SCHEMA_VERSION: u32 = 4;
 
 fn default_schema_version() -> u32 {
     SETTINGS_SCHEMA_VERSION
@@ -45,11 +46,45 @@ fn default_maximum_purges_per_hour() -> u32 {
     2
 }
 
+fn default_selected_gpu() -> String {
+    "auto".into()
+}
+
+fn default_hud_detail_level() -> String {
+    "summary".into()
+}
+
+fn default_hud_refresh_interval() -> u64 {
+    1_000
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AppSettings {
     #[serde(default = "default_true")]
     pub performance_hud_enabled: bool,
+    #[serde(default = "default_true")]
+    pub hud_show_cpu: bool,
+    #[serde(default = "default_true")]
+    pub hud_show_gpu: bool,
+    #[serde(default = "default_true")]
+    pub hud_show_ram: bool,
+    #[serde(default = "default_true")]
+    pub hud_show_fps: bool,
+    #[serde(default = "default_true")]
+    pub hud_show_frame_time: bool,
+    #[serde(default = "default_true")]
+    pub hud_show_cleaner_state: bool,
+    #[serde(default = "default_selected_gpu")]
+    pub hud_selected_gpu: String,
+    #[serde(default)]
+    pub hud_compact_mode: bool,
+    #[serde(default = "default_hud_detail_level")]
+    pub hud_detail_level: String,
+    #[serde(default = "default_hud_refresh_interval")]
+    pub hud_refresh_interval_ms: u64,
+    #[serde(default)]
+    pub fps_capture_permitted: bool,
     #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     #[serde(default = "default_true")]
@@ -82,12 +117,33 @@ pub struct AppSettings {
     pub maximum_purges_per_hour: u32,
     #[serde(default)]
     pub cleaner_excluded_applications: Vec<String>,
+    #[serde(default = "default_true")]
+    pub gamefocus_enabled: bool,
+    #[serde(default = "default_true")]
+    pub gamefocus_auto_detect: bool,
+    #[serde(default)]
+    pub powershift_allow_on_battery: bool,
+    #[serde(default)]
+    pub game_profiles: Vec<GameProfile>,
+    #[serde(default)]
+    pub onboarding_completed: bool,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
             performance_hud_enabled: true,
+            hud_show_cpu: true,
+            hud_show_gpu: true,
+            hud_show_ram: true,
+            hud_show_fps: true,
+            hud_show_frame_time: true,
+            hud_show_cleaner_state: true,
+            hud_selected_gpu: default_selected_gpu(),
+            hud_compact_mode: false,
+            hud_detail_level: default_hud_detail_level(),
+            hud_refresh_interval_ms: default_hud_refresh_interval(),
+            fps_capture_permitted: false,
             schema_version: SETTINGS_SCHEMA_VERSION,
             guardian_enabled: true,
             close_to_tray: true,
@@ -104,6 +160,11 @@ impl Default for AppSettings {
             cleaner_minimum_interval_ms: default_cleaner_minimum_interval(),
             maximum_purges_per_hour: default_maximum_purges_per_hour(),
             cleaner_excluded_applications: Vec::new(),
+            gamefocus_enabled: true,
+            gamefocus_auto_detect: true,
+            powershift_allow_on_battery: false,
+            game_profiles: Vec::new(),
+            onboarding_completed: false,
         }
     }
 }
@@ -115,6 +176,13 @@ impl AppSettings {
         self.background_interval_ms = self.background_interval_ms.clamp(1_000, 30_000);
         if self.background_interval_ms < self.foreground_interval_ms {
             self.background_interval_ms = self.foreground_interval_ms;
+        }
+        self.hud_refresh_interval_ms = self.hud_refresh_interval_ms.clamp(500, 10_000);
+        if self.hud_detail_level != "summary" && self.hud_detail_level != "detailed" {
+            self.hud_detail_level = "summary".into();
+        }
+        if self.hud_selected_gpu.trim().is_empty() {
+            self.hud_selected_gpu = "auto".into();
         }
         self.cleaner_poll_interval_ms = self.cleaner_poll_interval_ms.clamp(1_000, 60_000);
         self.standby_threshold_bytes = self
@@ -136,6 +204,13 @@ impl AppSettings {
             .collect();
         self.cleaner_excluded_applications.sort();
         self.cleaner_excluded_applications.dedup();
+        self.game_profiles.truncate(64);
+        for profile in &mut self.game_profiles {
+            profile.name = profile.name.trim().to_string();
+            profile.executable = profile.executable.trim().to_ascii_lowercase();
+        }
+        self.game_profiles
+            .retain(|p| !p.id.trim().is_empty() && !p.executable.is_empty());
         self
     }
 }
@@ -287,11 +362,15 @@ mod tests {
         let settings = AppSettings {
             foreground_interval_ms: 50,
             background_interval_ms: 25,
+            hud_refresh_interval_ms: 100,
+            hud_detail_level: "invalid".into(),
             ..Default::default()
         }
         .validated();
         assert_eq!(settings.foreground_interval_ms, 500);
         assert_eq!(settings.background_interval_ms, 1_000);
+        assert_eq!(settings.hud_refresh_interval_ms, 500);
+        assert_eq!(settings.hud_detail_level, "summary");
         assert_eq!(settings.cleaner_poll_interval_ms, 5_000);
         assert!(!settings.automatic_cleaning_enabled);
     }

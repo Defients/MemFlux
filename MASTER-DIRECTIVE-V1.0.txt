@@ -1,0 +1,1630 @@
+# MEMFLUX — MASTER DEVELOPMENT DIRECTIVE V1.0
+## Adaptive Memory Intelligence · Powered by CosmoTech™
+
+**Agent target:** Argon High or equivalent autonomous senior engineering agent  
+**Project:** MemFlux  
+**Platform:** Windows 10/11, x64 first  
+**Preferred architecture:** Tauri 2 + React + TypeScript + Tailwind CSS + Rust  
+**Execution mode:** Repository-audit-first, autonomous phased implementation  
+**Project status:** To be determined by repository inspection
+
+---
+
+# 0. YOUR MISSION
+
+You are assuming responsibility for the architectural design, implementation, engineering quality, visual identity, validation, and evolutionary direction of **MemFlux**, a lightweight, powerful, aesthetically distinctive Windows memory intelligence application.
+
+MemFlux takes conceptual inspiration from utilities such as Intelligent Standby List Cleaner (ISLC), but it must become an original, modern product rather than a feature-for-feature clone.
+
+It must combine:
+
+1. Real-time Windows memory monitoring.
+2. Accurate interpretation of Windows memory behavior.
+3. Carefully controlled standby-list management where technically viable.
+4. Adaptive, evidence-informed optimization decisions.
+5. Gaming and performance-session awareness.
+6. Diagnostic visualizations and historical insights.
+7. Optional timer-resolution experimentation.
+8. A beautiful, highly refined CosmoTech™ interface.
+9. Extremely lightweight background operation.
+10. Meaningful safeguards, transparency, and user control.
+
+The fundamental philosophy:
+
+**The best memory optimization is sometimes no optimization at all.**
+
+Do not assume freed standby memory equals improved performance. Do not equate reduced memory usage with improved system health.
+
+MemFlux must distinguish:
+
+- Memory that is actively required.
+- Memory that is cached and readily reusable.
+- Genuine physical-memory pressure.
+- Commit pressure.
+- Paging activity.
+- Symptoms that might indicate memory-related performance degradation.
+- Problems unrelated to memory.
+- Actions that are merely cosmetic.
+- Actions that produce measurable improvement.
+
+The product should never fabricate optimization success, exaggerate performance gains, or conceal its underlying behavior.
+
+Our ambition is to build the most useful, trustworthy, visually sophisticated application possible within the constraints of the Windows memory-management architecture.
+
+---
+
+# 1. MANDATORY REPOSITORY AUDIT — BEFORE IMPLEMENTATION
+
+Begin by inspecting the actual repository.
+
+Do not assume an existing codebase is empty, complete, functional, or architecturally suitable.
+
+Inspect:
+
+- Repository structure and files.
+- Package manifests and lockfiles.
+- Existing application framework.
+- Rust crates and native modules.
+- React components and styling systems.
+- Windows API integrations.
+- Build scripts and release configuration.
+- Existing assets and branding.
+- Tests and CI.
+- Existing documentation.
+- Git status and recent relevant history.
+- Known defects, TODOs, and unfinished implementations.
+- Dependencies and possible security problems.
+
+Identify anything that should be reused rather than replaced.
+
+If the repository is empty or effectively blank, establish the project from first principles using the recommended stack unless evidence supports a better alternative.
+
+Do not introduce unnecessary dependencies or rewrite functional components simply because another approach is more fashionable.
+
+### Mandatory audit deliverables
+
+Produce a concise initial report explaining:
+
+**A. Current reality**
+
+What actually exists, what works, and what is missing.
+
+**B. Architecture assessment**
+
+Whether the existing architecture can support trustworthy Windows monitoring and safely constrained interventions.
+
+**C. Risk register**
+
+Identify OS compatibility, undocumented API dependencies, security concerns, performance overhead, accessibility, and deployment risks.
+
+**D. Implementation strategy**
+
+Describe which existing components to preserve, which to refactor, and which to create.
+
+**E. Phase plan**
+
+Define executable milestones with testable completion criteria.
+
+Do not confuse proposed work with implemented work.
+
+Continue into implementation after completing the audit unless a genuine external blocker prevents progress.
+
+---
+
+# 2. PRODUCT IDENTITY LOCK
+
+MemFlux is a native-feeling Windows system intelligence utility built for enthusiasts, gamers, streamers, and users who want to understand and responsibly manage system memory.
+
+Its identity rests on five pillars.
+
+### 2.1 Intelligence over aggression
+
+MemFlux must prioritize understanding system conditions before taking action.
+
+### 2.2 Transparency over marketing
+
+Users should always know what the application is doing, why it is doing it, and whether it helped.
+
+### 2.3 Lightweight engineering
+
+The optimizer must not become a meaningful source of the performance degradation it claims to address.
+
+### 2.4 Elegant accessibility
+
+A casual user should be able to understand the application without mastering Windows internals. Advanced users must still have meaningful control.
+
+### 2.5 CosmoTech™ excellence
+
+MemFlux should look futuristic, polished, premium, and visually distinctive without becoming cluttered, distracting, or computationally expensive.
+
+These principles are non-negotiable unless actual evidence justifies a narrowly scoped exception that better serves the underlying mission.
+
+---
+
+# 3. ARCHITECTURAL DIRECTION
+
+Default to:
+
+**Desktop shell**
+- Tauri 2.
+- Native Windows packaging.
+- System tray integration.
+- Minimal idle overhead.
+
+**Frontend**
+- React.
+- TypeScript with strict typing.
+- Tailwind CSS.
+- Reusable components.
+- Accessible headless UI primitives where beneficial.
+- Lightweight chart rendering.
+
+**Backend**
+- Rust.
+- Modular Windows API adapters.
+- Typed communication contracts.
+- Dedicated telemetry and optimization subsystems.
+- Deterministic decision logic.
+
+**Persistence**
+- SQLite for historical session/event data if justified.
+- A simpler structured format for small settings files if appropriate.
+- Explicit schema versioning and migration support.
+
+Proposed modular architecture:
+
+```text
+MemFlux/
+  src/
+    app/
+    components/
+      dashboard/
+      navigation/
+      telemetry/
+      guardian/
+      sessions/
+      timer-lab/
+      settings/
+      common/
+    hooks/
+    state/
+    styles/
+    themes/
+    types/
+    utils/
+
+  src-tauri/
+    src/
+      core/
+      telemetry/
+      windows/
+      memory/
+      guardian/
+      actions/
+      profiles/
+      sessions/
+      timer/
+      persistence/
+      ipc/
+      security/
+      diagnostics/
+    capabilities/
+    icons/
+
+  tests/
+  docs/
+  assets/
+```
+
+This is a suggested layout, not a rigid demand. Adapt to repository reality.
+
+Architecturally separate:
+
+1. Data collection.
+2. Data validation.
+3. Derived metrics.
+4. Optimization decisions.
+5. Privileged native actions.
+6. Persistence.
+7. User-facing presentation.
+
+Never allow the React frontend to be the authority that directly executes unrestricted system changes.
+
+Use typed IPC commands with explicit authorization and argument validation.
+
+Do not introduce a permanent Windows service unless there is an objectively demonstrated requirement.
+
+---
+
+# 4. WINDOWS MEMORY OBSERVABILITY ENGINE
+
+Build a native telemetry collector capable of reporting meaningful Windows memory statistics.
+
+Prefer stable, documented Windows APIs and performance counters.
+
+Investigate and appropriately use:
+
+- `GlobalMemoryStatusEx`
+- `GetPerformanceInfo`
+- `CreateMemoryResourceNotification`
+- `QueryMemoryResourceNotification`
+- Windows Performance Data Helper (PDH)
+- Documented Windows performance counters
+- Optional ETW instrumentation where justified
+
+Relevant measurements may include:
+
+- Installed/usable physical memory.
+- Available physical memory.
+- Physical-memory utilization.
+- Free and zero pages.
+- Standby cache composition.
+- Modified pages.
+- Commit charge.
+- Commit limit.
+- Commit utilization.
+- Hard-page-read activity.
+- Relevant paging I/O metrics.
+- System memory-pressure indications.
+- Memory usage by selected processes.
+- MemFlux's own memory and CPU overhead.
+
+### Critical correctness requirements
+
+Understand that `MEMORYSTATUSEX.ullAvailPhys` already includes standby, free, and zero pages.
+
+Never double-count standby cache when calculating available memory.
+
+Do not label all page faults as hard faults.
+
+Do not assume that high standby-memory usage represents a problem.
+
+Do not imply that increasing free-memory counters necessarily improves gaming performance.
+
+Avoid using a single percentage as the definitive measure of memory pressure.
+
+Each measurement must carry:
+
+- Metric identifier.
+- Numerical value.
+- Unit.
+- Source.
+- Timestamp.
+- Sampling interval where relevant.
+- Collection status.
+- Availability or confidence metadata if applicable.
+
+Implement graceful fallbacks for missing counters, different Windows builds, localized counter names, unavailable privileges, and API failures.
+
+Unavailable metrics must be explicitly represented as unavailable, never silently replaced with invented values.
+
+### Collection policy
+
+Use adaptive sampling.
+
+Suggested initial behavior:
+
+- Dashboard visible: approximately 1-second sampling.
+- Background/tray: slower sampling when safe.
+- Detailed performance session: configurable sampling based on actual overhead.
+- Historical persistence: aggregated samples rather than unlimited raw data.
+
+These are starting assumptions, not permanent constants.
+
+Measure their cost before finalizing.
+
+Collection must run independently of UI rendering.
+
+Suspending or hiding the dashboard must not accidentally terminate the configured background guardian.
+
+---
+
+# 5. STANDBY-LIST MANAGEMENT ENGINE
+
+This is the most technically sensitive part of the project.
+
+Investigate the actual feasibility of standby-list clearing on supported Windows versions.
+
+Legacy utilities may use native Windows system-information interfaces that are internal or incompletely documented.
+
+Do not treat those interfaces as stable public contracts.
+
+Before implementing memory-clearing functionality:
+
+1. Identify the exact OS mechanism.
+2. Determine whether the necessary operations are documented and supported.
+3. Establish privilege requirements.
+4. Validate target Windows build compatibility.
+5. Investigate failure modes.
+6. Isolate all unstable operations behind a narrow adapter.
+7. Implement capability detection.
+8. Implement an explicit unsupported-state fallback.
+9. Test actual post-action behavior.
+10. Document limitations honestly.
+
+Do not fabricate a standby-clearing implementation.
+
+Do not substitute process working-set trimming and falsely label it standby-list clearing.
+
+Do not simulate a successful action when the native operation failed.
+
+Do not experiment with arbitrary undocumented information-class values against a user's system.
+
+Any compatibility-specific implementation must be isolated, independently tested, and disabled on unverified OS configurations.
+
+### Required action interface
+
+The native subsystem should expose structured operations conceptually resembling:
+
+```typescript
+type MemoryActionRequest = {
+  action: "clear_standby" | "clear_priority0_standby";
+  origin: "manual" | "guardian";
+  reason: string;
+};
+
+type MemoryActionResult = {
+  status:
+    | "success"
+    | "skipped"
+    | "unsupported"
+    | "permission_denied"
+    | "failed";
+
+  startedAt: string;
+  completedAt: string;
+
+  before: MemorySnapshot;
+  after?: MemorySnapshot;
+
+  explanation: string;
+  nativeErrorCode?: number;
+};
+```
+
+Adapt types to actual architecture and verified native capabilities.
+
+Only expose specific actions supported by the implementation.
+
+### Manual cleaning
+
+Provide a manual memory-management control only when its implementation is functional and sufficiently validated.
+
+Include:
+
+- Clear explanation of the action.
+- Appropriate confirmation for potentially disruptive operations.
+- Immediate status feedback.
+- Before/after memory snapshots.
+- Error handling.
+- Cooldown restrictions.
+- Honest outcome reporting.
+
+Do not implement a misleading universal "Optimize RAM" button that silently performs undocumented or unrelated actions.
+
+### Automated cleaning
+
+Automatic standby-list cleaning must be disabled by default.
+
+Enable it only through clear, informed user consent and only on verified configurations.
+
+Do not schedule indiscriminate periodic purges.
+
+---
+
+# 6. ADAPTIVE GUARDIAN — DECISION ENGINE
+
+Create the centerpiece of MemFlux:
+
+**Adaptive Guardian**
+
+Its responsibility is to continuously evaluate memory conditions and determine whether any action is justified.
+
+Begin with a deterministic, explainable rules engine.
+
+Do not introduce machine learning merely because the product includes the word "intelligence."
+
+### Inputs
+
+Consider signals such as:
+
+- Available physical memory.
+- OS low-memory notifications.
+- Standby composition.
+- Commit pressure.
+- Sustained page-read activity.
+- Relevant trends rather than isolated readings.
+- Active foreground application.
+- Gaming session status.
+- Power source.
+- Previous intervention outcomes.
+- Recent intervention frequency.
+- User-configured restrictions.
+- Collector availability and measurement confidence.
+
+### Decision pipeline
+
+```text
+Collect
+   ↓
+Validate
+   ↓
+Derive memory-pressure indicators
+   ↓
+Check OS and action capability
+   ↓
+Evaluate safeguards
+   ↓
+Evaluate intervention policy
+   ↓
+Observe / Recommend / Act
+   ↓
+Measure result
+   ↓
+Record decision and explanation
+```
+
+The system must support three distinct outcomes:
+
+**Observe**
+
+No action justified.
+
+**Recommend**
+
+A potentially helpful action is identified, but user confirmation or further evidence is required.
+
+**Act**
+
+An explicitly authorized action is executed after every necessary safeguard passes.
+
+### Required safeguards
+
+- Default to observe-only.
+- Use hysteresis and sustained-condition windows.
+- Avoid single-sample triggers.
+- Enforce cooldown periods.
+- Enforce maximum interventions per time window.
+- Suspend interventions when telemetry is unreliable.
+- Honor application exclusions.
+- Honor power and battery policies.
+- Avoid actions during critical system transitions where detectable.
+- Never perform aggressive recovery loops.
+- Never recursively respond to an action's own short-term telemetry effects.
+- Stop immediately when the user disables Guardian.
+- Preserve previous settings if the application crashes or restarts.
+
+### Explainability
+
+Every decision must generate a reason code and human-readable explanation.
+
+Examples:
+
+"Standby cache is large, but available memory remains healthy. No cleaning needed."
+
+"Windows reports low available memory, but the available evidence does not establish that clearing standby cache will help. Monitoring continues."
+
+"Automatic intervention blocked: configured cooldown remains active."
+
+"Memory intervention unavailable on this Windows configuration."
+
+### Policy evolution
+
+Create extensibility for future learning from historical intervention results, but do not automatically adjust aggressive thresholds without validation.
+
+Any adaptive model must remain bounded by hard safety rules.
+
+---
+
+# 7. OPERATION MODES
+
+Implement or architect the following three operating modes.
+
+## Mode A — Guardian
+
+Default mode.
+
+Purpose:
+
+Safe, low-overhead system observation and optional conservative intervention.
+
+Features:
+
+- Automatic memory monitoring.
+- Pressure assessment.
+- Guardian status.
+- Decision explanations.
+- Alerts for genuine issues.
+- Conservative optional cleaning.
+- Historical decision log.
+- Simple pause/resume controls.
+
+## Mode B — Manual
+
+For enthusiasts who want explicit control.
+
+Features:
+
+- Available manual actions.
+- Standby-related controls where verified.
+- Threshold configuration.
+- Polling configuration.
+- Safety limits.
+- Permission status.
+- Clear action history.
+- Detailed memory composition.
+
+Manual mode must never bypass hard compatibility restrictions.
+
+## Mode C — Research Lab
+
+For controlled experimentation.
+
+Features:
+
+- Session capture.
+- Baseline measurement.
+- Action annotations.
+- Comparison views.
+- Frame-time integration where available.
+- Exportable data.
+- Repeatability guidance.
+- Evidence-based interpretation.
+
+Distinguish exploratory correlations from established causal improvements.
+
+---
+
+# 8. COSMOTECH™ DESIGN SYSTEM
+
+MemFlux must feel like an exceptionally polished modern desktop utility.
+
+The design language is:
+
+**Midnight CosmoTech™**
+
+Visual qualities:
+
+- Deep midnight backgrounds.
+- Elegant purple and violet accents.
+- Restrained electric-blue highlights.
+- Selective magenta lighting.
+- Subtle atmospheric gradients.
+- Refined borders.
+- Soft dimensional layering.
+- Crisp typography.
+- Carefully controlled microanimations.
+- Excellent information hierarchy.
+
+Avoid:
+
+- Excessive neon.
+- Glitch effects.
+- Generic cyberpunk clichés.
+- Constant particle effects.
+- Giant animated backgrounds.
+- Overly bright surfaces.
+- Excessive blur.
+- Oversized empty cards.
+- Nested scrolling containers without purpose.
+- Decorative elements that obscure diagnostics.
+
+### Suggested theme tokens
+
+```css
+--background: #0D0C1C;
+--surface: #161429;
+--surface-raised: #201B39;
+--surface-hover: #292347;
+
+--accent-primary: #A978FF;
+--accent-secondary: #78BEFF;
+--accent-tertiary: #D58FFF;
+
+--text-primary: #F3EEFF;
+--text-secondary: #AFA6C4;
+--text-muted: #817995;
+
+--status-success: #77D9B4;
+--status-warning: #F0C36C;
+--status-danger: #F17894;
+
+--border-subtle: #342D4E;
+```
+
+Treat these as initial creative guidance rather than immovable constraints.
+
+Maintain semantic tokens, not scattered hardcoded colors.
+
+### Typography
+
+Choose a modern, readable sans-serif system.
+
+Prefer:
+
+- Crisp numerical readouts.
+- Tabular numerals for live values.
+- Distinct metric labels.
+- Comfortable reading sizes.
+- Deliberate title hierarchy.
+- Excellent contrast.
+
+Prioritize information clarity over decorative type.
+
+### Motion philosophy
+
+Animations should reinforce state changes.
+
+Examples:
+
+- Gentle chart transitions.
+- A restrained Guardian heartbeat.
+- Subtle accent glints for major interactions.
+- Smooth navigation changes.
+- Responsive press and hover feedback.
+- A quiet, meaningful visual indication of an intervention event.
+
+Support reduced-motion settings.
+
+Avoid continuous animations that produce meaningful CPU/GPU load while the window is idle or hidden.
+
+---
+
+# 9. APPLICATION INFORMATION ARCHITECTURE
+
+Design a cohesive desktop shell with responsive navigation.
+
+Recommended areas:
+
+## 9.1 Overview
+
+The command center.
+
+It should communicate at a glance:
+
+- Current system-memory condition.
+- Available physical memory.
+- Standby cache.
+- Commit pressure.
+- Relevant memory trends.
+- Guardian status.
+- Last intervention.
+- Whether action is recommended.
+- Active monitoring status.
+
+One dominant visual element may be a refined memory-composition display or compact interactive graph.
+
+Avoid double-counted quantities in charts.
+
+Provide clear legends and tooltips.
+
+A prominent, trustworthy Guardian message should explain current conditions.
+
+## 9.2 Memory Explorer
+
+Provide deeper insight into:
+
+- RAM composition.
+- Standby classifications.
+- Available versus actively used memory.
+- Commit and paging.
+- Selected process information.
+- Historical trends.
+- Sensor availability.
+
+Use progressive disclosure.
+
+Don't present twenty unrelated metrics in one overwhelming grid.
+
+## 9.3 Adaptive Guardian
+
+Dedicated controls for:
+
+- Guardian enable/disable.
+- Monitoring-only versus authorized intervention.
+- Decision history.
+- Safeguards.
+- Threshold policies.
+- Exclusions.
+- Cooldowns.
+- Automated action explanations.
+
+## 9.4 Performance Sessions
+
+Provide an experimental environment for comparing system behavior over time.
+
+Core features:
+
+- Start session.
+- Stop session.
+- Session title and notes.
+- Associated application.
+- Memory timeline.
+- Recorded interventions.
+- Export results.
+- Compare compatible captures.
+
+Advanced measurements are optional and should be clearly marked as such.
+
+## 9.5 Timer Laboratory
+
+Timer-resolution investigation and experimentation.
+
+Keep this function separate from the memory optimizer.
+
+## 9.6 Settings
+
+Organize into logical groups:
+
+- General.
+- Startup and tray.
+- Appearance.
+- Monitoring.
+- Guardian safeguards.
+- Game profiles.
+- Timer options.
+- Data and privacy.
+- Diagnostics.
+- About.
+
+Settings changes should behave predictably and persist reliably.
+
+---
+
+# 10. FIRST-RUN USER EXPERIENCE
+
+Build a short, elegant onboarding sequence.
+
+The user should understand what MemFlux does before enabling privileged operations.
+
+Suggested flow:
+
+**Step 1 — Welcome**
+
+Introduce MemFlux as an intelligent memory monitoring and optimization utility.
+
+**Step 2 — System capability scan**
+
+Identify:
+
+- Windows version/build.
+- RAM capacity.
+- Supported telemetry.
+- Available actions.
+- Permission requirements.
+- Unsupported features.
+
+Do not immediately demand administrator privileges.
+
+**Step 3 — Choose a starting mode**
+
+Default:
+
+Guardian with monitoring only.
+
+Offer Manual and Research Lab as alternatives.
+
+**Step 4 — Privacy and background behavior**
+
+Explain local data collection, startup options, monitoring, and historical storage.
+
+Do not silently enable auto-start.
+
+**Step 5 — Enter dashboard**
+
+Show real data when available.
+
+If the engine is still initializing, show a genuine loading state.
+
+No fabricated telemetry, even temporarily.
+
+---
+
+# 11. GAMING INTELLIGENCE
+
+MemFlux should become especially useful for gamers.
+
+However, gaming features must remain optional and must not compromise stability or compatibility with anti-cheat systems.
+
+### Initial gaming features
+
+- Foreground-application detection.
+- Optional allowlisted game detection.
+- Per-game profiles.
+- Game session history.
+- Automatic switching between monitoring profiles.
+- Conservative background resource usage while gaming.
+
+### Performance instrumentation
+
+Investigate integration with Intel PresentMon or another suitable, well-maintained mechanism.
+
+Potential metrics:
+
+- FPS.
+- Frame-time distribution.
+- Median frame time.
+- 95th/99th percentile frame times.
+- Frame pacing variation.
+- Stutter-event frequency using a documented definition.
+- CPU/GPU timing where available.
+
+Do not assume that every game, graphics API, or hardware configuration supports identical metrics.
+
+Respect tool licensing and redistribution requirements.
+
+Prefer official integration paths.
+
+Do not inject code into games, tamper with anti-cheat, or modify protected processes.
+
+### Per-game profiles
+
+Potential profile fields:
+
+- Executable identity.
+- Monitoring frequency.
+- Optional intervention restrictions.
+- Session capture preferences.
+- Timer laboratory settings.
+- Overlay preferences.
+- Battery-related behavior.
+
+Always restore the prior applicable configuration when a game session ends.
+
+---
+
+# 12. PERFORMANCE EXPERIMENTATION
+
+A defining differentiator of MemFlux should be evidence-based performance measurement.
+
+Implement a session-comparison architecture that can eventually answer:
+
+"Did this intervention actually improve performance?"
+
+### Required methodology
+
+- Capture a baseline.
+- Record configuration.
+- Record application identity.
+- Record session duration.
+- Record intervention timestamps.
+- Compare equivalent workloads where feasible.
+- Warn about uncontrolled variables.
+- Show uncertainty.
+- Avoid overclaiming.
+
+Do not compare a loading screen against a gameplay session and call the result a performance improvement.
+
+Support repeated alternating A/B trials for credible comparisons.
+
+Potential reports:
+
+- Memory-pressure changes.
+- Paging I/O changes.
+- Frame-time distribution changes.
+- Guardian action frequency.
+- System overhead during measurement.
+
+### Outcome classifications
+
+Use language such as:
+
+- Improvement observed.
+- No meaningful change detected.
+- Possible regression.
+- Evidence insufficient.
+- Measurement unavailable.
+
+Do not create an arbitrary "Optimization Score" that masquerades as scientific evidence.
+
+---
+
+# 13. TIMER LABORATORY
+
+Provide a specialized diagnostic area for Windows timer behavior.
+
+This feature must reflect modern Windows semantics.
+
+Microsoft documents that `timeBeginPeriod` requests a minimum timer period for the calling process; on modern Windows it should not be presented as a guaranteed global timer adjustment.
+
+Windows 11 also has additional behavior affecting occluded or minimized applications.
+
+### Required investigation
+
+Examine:
+
+- Supported timer APIs.
+- Minimum and maximum requested periods.
+- Effective/requested resolution distinctions.
+- Process-scoped behavior.
+- Relevant Windows build differences.
+- Power-efficiency implications.
+- Timing jitter measurement.
+- Proper release of requests.
+
+Do not assume a 0.5 ms request is possible through `timeBeginPeriod`, which accepts integer millisecond periods.
+
+Any finer-resolution mechanism requires separate research and compatibility assessment.
+
+### Interface
+
+The Timer Lab should display:
+
+- Supported capabilities.
+- Requested timer period, if any.
+- Measured timing statistics if technically defensible.
+- Active request state.
+- Warnings.
+- Power implications.
+- Restoration status.
+
+### Safety
+
+- Disabled by default.
+- User-controlled activation.
+- Match every successful request with its release operation.
+- Release on mode changes and shutdown.
+- Handle crashes using process-scoped cleanup semantics where applicable.
+- Never promise universal FPS or latency improvements.
+
+Do not add undocumented systemwide timer manipulation merely to advertise a smaller numerical value.
+
+---
+
+# 14. COMPACT MONITOR AND STREAMER MODE
+
+Create a compact, lightweight monitoring experience.
+
+Initial requirement:
+
+A small optional always-on-top window that shows:
+
+- Memory availability.
+- Pressure status.
+- Guardian state.
+- Last intervention, when relevant.
+- Optional miniature trend chart.
+
+Potential enhancements:
+
+- Resizable layout.
+- Adjustable transparency.
+- Click-through presentation.
+- Multiple information presets.
+- Global show/hide hotkey.
+- Corner anchoring.
+- Multi-monitor support.
+- DPI-aware positioning.
+
+A full game overlay must be evaluated separately for compatibility and anti-cheat implications.
+
+Prefer ordinary Windows desktop-window behavior rather than graphics API injection.
+
+A transparent desktop window does not guarantee a reliable overlay above exclusive-fullscreen games.
+
+Be explicit about these limitations.
+
+---
+
+# 15. SYSTEM TRAY AND BACKGROUND EXPERIENCE
+
+MemFlux should remain practical even when the main window is closed.
+
+Required behavior:
+
+- System tray icon.
+- Status-aware tooltip.
+- Open dashboard.
+- Pause/resume monitoring.
+- Guardian status.
+- Exit application.
+- Optional launch at Windows sign-in.
+- Persistent preferences.
+
+Offer clear distinction between:
+
+- Closing the dashboard.
+- Minimizing to tray.
+- Suspending Guardian.
+- Fully exiting MemFlux.
+
+Do not silently remain running when the user explicitly chooses Exit.
+
+Ensure background monitoring cannot accidentally create duplicate instances or duplicate timer requests.
+
+Use a sensible single-instance policy.
+
+---
+
+# 16. SECURITY AND PRIVILEGE MODEL
+
+Security is a first-class architectural requirement.
+
+### Privilege separation
+
+The primary UI should operate without administrator privileges.
+
+If a specific operation requires elevation, use a narrowly scoped elevated helper rather than running the entire interface as administrator.
+
+Prefer per-action elevation where practical.
+
+Avoid installing a continuously privileged service without compelling justification.
+
+### IPC security
+
+If a helper uses named pipes or equivalent IPC:
+
+- Authenticate clients.
+- Apply restrictive access controls.
+- Validate message types.
+- Validate input ranges.
+- Reject unknown commands.
+- Prevent arbitrary command execution.
+- Prevent arbitrary filesystem access.
+- Avoid unsafe deserialization.
+- Avoid privilege escalation paths.
+
+### Additional protections
+
+- No kernel driver.
+- No Windows security-feature disabling.
+- No registry "performance hacks."
+- No hidden system modifications.
+- No arbitrary process termination.
+- No undisclosed background network access.
+- No secrets in diagnostic exports.
+- No unrestricted shell commands from frontend input.
+
+Use Tauri's capability system according to least-privilege principles.
+
+### Privacy
+
+Local-first operation.
+
+No account required.
+
+No analytics or telemetry uploaded by default.
+
+Any future cloud functionality must be explicitly opt-in.
+
+Session exports should be transparent and user-controlled.
+
+---
+
+# 17. RESOURCE-EFFICIENCY REQUIREMENTS
+
+MemFlux must be lightweight by design and measurement.
+
+Establish performance budgets before development and measure them on representative Windows hardware.
+
+Suggested initial targets, subject to practical validation:
+
+- Background CPU: target below 0.5% average under stable idle conditions on representative modern hardware.
+- Background memory: minimize resident working set, with an initial exploratory budget around 50–100 MB for the combined application.
+- Dashboard refresh: smooth without unnecessary excessive rendering.
+- Monitoring: no busy-wait loops.
+- Persistence: bounded history and batching.
+- Startup: responsive, with non-blocking system probing.
+- Shutdown: complete cleanup of owned resources.
+
+These are engineering targets, not claims that the application currently satisfies them.
+
+Measure and report actual results.
+
+If a charting library, animation system, or framework choice materially compromises the resource budget, reconsider it.
+
+The monitoring engine should continue efficiently when no dashboard is visible.
+
+---
+
+# 18. ERROR HANDLING AND FAILURE STATES
+
+Design explicit failure behavior for:
+
+- Unsupported Windows version.
+- Unsupported native memory operation.
+- Missing performance counters.
+- Failed permissions.
+- User denial of UAC.
+- Privileged helper failure.
+- Telemetry timeout.
+- Sampling failure.
+- Historical storage corruption.
+- Missing optional instrumentation.
+- Interrupted performance session.
+- Application restart.
+- Windows shutdown.
+- Sleep/resume.
+- Display or DPI changes.
+- Unexpected process termination.
+
+### Failure philosophy
+
+Failure should be:
+
+- Visible.
+- Explainable.
+- Recoverable where feasible.
+- Properly logged.
+- Non-destructive.
+- Never misrepresented as success.
+
+Use clear statuses such as:
+
+- Monitoring.
+- Paused.
+- Restricted.
+- Unsupported.
+- Permission required.
+- Degraded.
+- Error.
+
+No fake "All systems optimized" banner when a critical collector is broken.
+
+---
+
+# 19. TESTING AND VALIDATION
+
+Create comprehensive automated tests wherever practical.
+
+## Unit testing
+
+Test:
+
+- Memory calculations.
+- Unit conversions.
+- Sampling normalization.
+- Pressure indicators.
+- Guardian policy decisions.
+- Threshold boundaries.
+- Hysteresis.
+- Cooldowns.
+- Rate limits.
+- Capability checks.
+- Settings migration.
+- Session comparisons.
+
+Use deterministic recorded fixtures.
+
+## Native integration testing
+
+Validate:
+
+- Windows API result handling.
+- Missing capabilities.
+- Native error propagation.
+- Permission handling.
+- Resource cleanup.
+- Timer request/release lifecycle.
+- Standby action gating.
+- Correct IPC validation.
+
+Use a mock backend to test UI behavior without requiring native operations.
+
+Never use mocks as proof that actual Windows memory clearing works.
+
+## UI testing
+
+Validate:
+
+- Navigation.
+- Responsiveness.
+- Keyboard controls.
+- Settings persistence.
+- Metric loading/error states.
+- Charts.
+- First-run flow.
+- System tray behavior.
+- Mini monitor.
+- Accessibility.
+- Reduced motion.
+
+Test at common Windows display scaling values, including 100%, 125%, 150%, and 200%.
+
+## Windows compatibility testing
+
+Cover representative Windows 10 and Windows 11 builds.
+
+Include:
+
+- Standard user.
+- Administrator elevation.
+- Missing permissions.
+- 8 GB RAM.
+- 16 GB RAM.
+- 32 GB or greater RAM where available.
+- Single and multiple monitors.
+- Sleep/resume.
+- Launch at startup.
+- Unsupported action scenarios.
+
+## Long-duration reliability
+
+Run extended monitoring sessions where feasible.
+
+Check:
+
+- Memory leaks.
+- Handle leaks.
+- CPU accumulation.
+- Excessive database growth.
+- Collector recovery.
+- Long-running scheduler stability.
+- Repeated suspend/resume behavior.
+
+## Performance credibility
+
+For any optimization claim, require comparable baseline and intervention measurements.
+
+Tests demonstrating that buttons run are not evidence that the optimization improves system performance.
+
+---
+
+# 20. IMPLEMENTATION PHASES
+
+Use incremental vertical slices that remain functional at each milestone.
+
+## PHASE 0 — Audit and Foundation
+
+- Inspect repository.
+- Confirm architecture.
+- Establish product identity.
+- Create implementation plan.
+- Establish dependencies.
+- Configure tooling.
+- Establish build and test pipelines.
+- Add project documentation.
+- Identify OS compatibility constraints.
+
+**Gate:** The project structure builds and architectural boundaries are documented.
+
+## PHASE 1 — Functional Monitoring MVP
+
+Build:
+
+- Native Windows collector.
+- Real memory measurements.
+- Overview dashboard.
+- Live metrics.
+- Basic memory charts.
+- Guardian monitoring-only logic.
+- Native status propagation.
+- Basic settings persistence.
+- System tray.
+- Diagnostic logging.
+- Initial CosmoTech visual system.
+
+**Gate:** The app runs on Windows and displays validated system data, without requiring privileged clearing operations.
+
+This is the first absolutely essential milestone.
+
+## PHASE 2 — Guardian and Manual Management
+
+Build:
+
+- Explainable Guardian policy.
+- Threshold configuration.
+- Cooldowns.
+- Safety limits.
+- Decision history.
+- Capability detection.
+- Optional verified standby-list actions.
+- Appropriate elevation boundaries.
+- Before/after action reporting.
+- Permission and error handling.
+
+**Gate:** All exposed memory actions are real, correctly gated, safe against repeated triggering, and demonstrably functional on tested Windows builds.
+
+If clearing cannot be implemented reliably, ship this milestone without claiming that feature works. Preserve a clean unsupported-capability state and continue delivering monitoring functionality.
+
+## PHASE 3 — Advanced Intelligence
+
+Build:
+
+- Historical telemetry.
+- Advanced Memory Explorer.
+- Performance sessions.
+- Session comparison.
+- Process awareness.
+- Game profiles.
+- Optional PresentMon integration.
+- Timer Lab.
+- Additional exports and diagnostics.
+
+**Gate:** Captured measurements are real, repeatable, correctly labeled, and do not imply unsupported causal conclusions.
+
+## PHASE 4 — Product Polish
+
+Build/refine:
+
+- CosmoTech animations.
+- Responsive layouts.
+- Compact monitor.
+- Accessibility.
+- First-run onboarding.
+- High-DPI behavior.
+- Installer.
+- Application icons.
+- Error recovery.
+- Settings migration.
+- Release documentation.
+- Production smoke testing.
+
+**Gate:** The application is packaged and tested as a credible Windows desktop utility.
+
+Do not leave the entire interface as disconnected static mockups while prioritizing obscure backend features.
+
+End-to-end functional slices take priority.
+
+---
+
+# 21. CREATIVE AUTONOMY
+
+You are encouraged to improve the design and implementation beyond the explicitly specified features.
+
+Potential improvements include:
+
+- More efficient chart rendering.
+- Better pressure-indicator models.
+- Smarter adaptive sampling.
+- More useful diagnostic explanations.
+- More intuitive onboarding.
+- Improved background state management.
+- Better session comparison methodology.
+- Useful Windows integration.
+- Additional accessibility features.
+- Clearer scientific evidence reporting.
+- Better naming for individual internal features.
+
+However, evaluate enhancements according to:
+
+1. Genuine user benefit.
+2. Technical correctness.
+3. Resource cost.
+4. Security implications.
+5. Complexity.
+6. Compatibility.
+7. Maintainability.
+8. Fit with product identity.
+
+Do not add speculative AI features, cloud infrastructure, heavy analytics frameworks, or services unless they meaningfully improve MemFlux.
+
+Originality is encouraged.
+
+Feature inflation is not.
+
+---
+
+# 22. DOCUMENTATION REQUIREMENTS
+
+Create or update:
+
+```text
+README.md
+docs/ARCHITECTURE.md
+docs/WINDOWS_API_COMPATIBILITY.md
+docs/MEMORY_MODEL.md
+docs/GUARDIAN_POLICY.md
+docs/SECURITY.md
+docs/TESTING.md
+docs/PERFORMANCE_VALIDATION.md
+docs/ROADMAP.md
+CHANGELOG.md
+```
+
+Adapt names to repository conventions.
+
+Documentation should distinguish:
+
+- Implemented.
+- Tested.
+- Partially implemented.
+- Experimental.
+- Planned.
+- Unsupported.
+
+Maintain an OS capability matrix.
+
+Document any internal or undocumented API dependencies, including the reason they were chosen and the configurations on which they have actually been tested.
+
+Keep documentation synchronized with working code.
+
+---
+
+# 23. ACCEPTANCE CRITERIA
+
+MemFlux V1 must not be called complete merely because the interface looks polished.
+
+At minimum:
+
+### Functionality
+
+- Real Windows memory metrics are collected successfully.
+- Critical metrics are calculated correctly.
+- The dashboard shows real values.
+- Telemetry errors are handled.
+- Background monitoring operates correctly.
+- Guardian decisions are explainable.
+- Automatic clearing is opt-in.
+- Unsupported native actions are not exposed as working.
+- Settings persist.
+- Logs are useful.
+- The application exits cleanly.
+
+### Technical quality
+
+- No obvious resource leaks.
+- No busy-wait monitoring loop.
+- No UI-blocking synchronous telemetry calls.
+- No unexplained administrator requirement.
+- No unrestricted privileged command path.
+- No fabricated benchmark results.
+- No unsupported optimization claims.
+- No critical test failures knowingly concealed.
+
+### Design quality
+
+- Cohesive Midnight CosmoTech™ visual identity.
+- Clear information hierarchy.
+- Readable graphs.
+- Smooth navigation.
+- Responsive window resizing.
+- High-DPI compatibility.
+- Consistent component styling.
+- Accessible interactive controls.
+- Meaningful loading/empty/error states.
+- No unnecessary visual clutter.
+
+### Delivery quality
+
+- Working Windows build or clearly identified external build limitation.
+- Executable test instructions.
+- Current architecture documentation.
+- Explicit feature status.
+- Known limitations.
+- Honest implementation summary.
+
+A mock-only application does not satisfy acceptance.
+
+A memory-clearing script with a beautiful wrapper does not satisfy acceptance.
+
+A technically sophisticated collector with an unusable interface does not satisfy acceptance.
+
+---
+
+# 24. EXECUTION AND REPORTING CONTRACT
+
+Work autonomously while remaining grounded in actual repository evidence.
+
+### Before coding
+
+Present:
+
+1. Identity lock.
+2. Repository audit summary.
+3. Architectural approach.
+4. Principal risks.
+5. Phased implementation plan.
+
+Then proceed with development.
+
+### During implementation
+
+- Keep changes cohesive.
+- Prefer testable increments.
+- Run relevant checks.
+- Address integration failures.
+- Avoid unnecessary rewrites.
+- Preserve existing user work.
+- Do not overwrite unrelated changes.
+- Maintain an honest record of completed and pending work.
+
+### When blocked
+
+Identify the exact blocker, provide evidence, and proceed with the highest-value safe work still possible.
+
+Do not pretend an untested Windows-specific feature is validated merely because it compiles elsewhere.
+
+### At completion
+
+Provide:
+
+**A. Implemented features**
+
+What is genuinely functional.
+
+**B. Architecture**
+
+Important engineering decisions.
+
+**C. Validation**
+
+Tests and builds actually executed, including results.
+
+**D. Windows compatibility**
+
+Verified versions and unverified assumptions.
+
+**E. Performance**
+
+Actual measured resource overhead if available.
+
+**F. Known limitations**
+
+No concealed incompleteness.
+
+**G. Remaining roadmap**
+
+Specific, prioritized next steps.
+
+**H. Final assessment**
+
+A candid evaluation of whether the current product is a prototype, alpha, beta, or production-ready build.
+
+---
+
+# 25. RESEARCH REFERENCES
+
+Consult authoritative current documentation rather than relying on guesses about Windows memory behavior.
+
+Relevant starting references:
+
+- Microsoft GlobalMemoryStatusEx:
+  https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-globalmemorystatusex
+
+- Microsoft MEMORYSTATUSEX:
+  https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/ns-sysinfoapi-memorystatusex
+
+- Microsoft GetPerformanceInfo:
+  https://learn.microsoft.com/en-us/windows/win32/api/psapi/nf-psapi-getperformanceinfo
+
+- Microsoft CreateMemoryResourceNotification:
+  https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-creatememoryresourcenotification
+
+- Microsoft NtQuerySystemInformation limitations:
+  https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntquerysysteminformation
+
+- Microsoft timeBeginPeriod:
+  https://learn.microsoft.com/en-us/windows/win32/api/timeapi/nf-timeapi-timebeginperiod
+
+- Tauri 2 capabilities:
+  https://v2.tauri.app/security/capabilities/
+
+- Intel PresentMon:
+  https://github.com/GameTechDev/PresentMon
+
+Validate API behavior against documentation and actual supported Windows configurations.
+
+---
+
+# 26. FINAL PRODUCT DIRECTIVE
+
+MemFlux must embody one core principle:
+
+**Measure first. Understand second. Intervene only when justified. Verify afterward.**
+
+We are not designing a program that indiscriminately releases as much RAM as possible.
+
+We are engineering a trustworthy performance-intelligence utility capable of explaining its choices and protecting users from ineffective optimizations.
+
+Its interface should be sufficiently attractive that users enjoy opening it.
+
+Its engine should be sufficiently efficient that they do not need to leave its interface open.
+
+Its diagnostics should be sufficiently accurate that advanced users can trust what they are seeing.
+
+And its intervention policy should be sufficiently disciplined that choosing to do nothing is recognized as an intelligent outcome rather than a failure.
+
+**Build MemFlux into a distinctive, elegant, technically credible Windows application.**
+
+**Powered by CosmoTech™.**
+
+Begin with the repository audit. Establish reality. Then execute the highest-value implementation phases and validate your work.
+
+Do not stop at a beautiful plan.
+
+Do not stop at a beautiful mockup.
+
+Build the foundation of the real product.
+
+**MEMFLUX — MASTER DIRECTIVE V1.0**

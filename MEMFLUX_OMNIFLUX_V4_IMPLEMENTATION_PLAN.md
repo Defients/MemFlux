@@ -1,6 +1,8 @@
 # OmniFlux V4 implementation ledger
 
-Audit: 2026-10-18. Baseline `fb6125aae32f7a9c1087328714b73aefb5a7550c`, main, clean and synchronized at audit. `sources/` remains read-only.
+Audit: 2026-10-19. Updated for V4.1 Core Completion (`MEMFLUX_V4_1_BETA_EXECUTION_PLAN.md`). `sources/` remains read-only.
+
+> **V4.1 Update:** Phases 1, 2, 3, 4, and 8 (authenticated session-helper IPC, independent monotonic scheduler, durable quota ledger, DXGI + WDDM GPU Engine HUD, PresentMon capture adapter, GameFocus session lifecycle & workload intelligence, Optimization Rewind journal, PowerShift Win32 power-scheme control, Central Optimization Coordinator, and NSIS/MSI installer packaging) are implemented in V4.1. See `MEMFLUX_V4_1_BETA_EXECUTION_PLAN.md` for full details.
 
 ## Inventory and reconciliation
 

@@ -1,77 +1,43 @@
 # MemFlux
 
-**Standby Memory Control + Adaptive Intelligence · Powered by CosmoTech™**
+**Standby Memory Control · GameFocus · Reversible PowerShift · Powered by CosmoTech™**
 
-MemFlux is a local-first Windows standby-memory cleaning utility. It performs a real, privilege-gated Windows standby-list purge, measures the system before and after, and keeps monitoring and Guardian diagnostics around that core action.
+MemFlux is a local-first Windows standby-memory cleaning and gaming session control utility. It performs a real, privilege-gated Windows standby-list purge, measures the system before and after, provides a live CPU/GPU/RAM/FPS sidebar HUD, detects gaming sessions with GameFocus, and applies verified, reversible Windows power schemes through PowerShift and Optimization Rewind.
 
-The current cleaner milestone is enabled only on the explicitly validated Windows build. Monitoring remains available without elevation; a manual purge launches the same binary in a narrow one-shot helper mode through Windows UAC.
+## Core V4.1 capabilities
 
-## Working cleaner milestone
+- **Manual & Authorized Automatic Standby Cleaner:**
+  - Prominent **PURGE STANDBY MEMORY** control calling `NtSetSystemInformation(SystemMemoryListInformation=80, MemoryPurgeStandbyList=4)` after enabling `SeProfileSingleProcessPrivilege`.
+  - Narrow one-shot UAC helper (`--memflux-elevated-purge-standby`) and explicitly authorized session helper (`--memflux-elevated-session-helper`) over an authenticated Windows Named Pipe (`PIPE_REJECT_REMOTE_CLIENTS`, restrictive SDDL DACL, `GetNamedPipeClientProcessId` / `GetNamedPipeServerProcessId` peer verification, executable image path verification, and parent-process liveness watchdog).
+  - Independent monotonic scheduler (`memflux-cleaner`) evaluating `standby_bytes >= standby_threshold` AND `free_zero_bytes <= free_zero_threshold` without coupling to dashboard refresh cadence.
+  - Durable quota ledger (`cleaner-quota.json`) and monotonic elapsed tracking enforcing minimum interval, cooldown, and rolling-hour limits across restarts and clock adjustments.
+- **Live Performance HUD:**
+  - Compact sidebar HUD (preserving 250 / 218 / 82 px responsive widths) displaying real `GetSystemTimes` CPU %, DXGI + WDDM `\GPU Engine(*)\Utilization Percentage` GPU % (attributed to the busiest engine without summing independent engines), physical RAM %, optional non-injecting Intel PresentMon FPS & frame-time ms, and truthful cleaner state.
+  - Full HUD customization persisted in schema-v4 settings (per-metric toggles, GPU adapter selection, summary/detailed attribution, compact mode, and FPS capture permission).
+- **GameFocus & Workload Intelligence:**
+  - Conservative Windows foreground + process-metadata game session detector with a strict non-game blocklist (never misclassifying MemFlux, browsers, OBS, Discord, or launchers as games).
+  - User-managed game profiles (`Balanced Gaming`, `Performance Gaming`, `Gaming + Streaming`, `Custom`) with debounced focus transitions (`TemporarilyBackgrounded` survives Alt+Tab without thrashing power schemes) and automatic restoration on game exit.
+  - Streaming workload protection (`obs64.exe`, `discord.exe`, `audiodg.exe`, `voicemeeter.exe`) and read-only background workload contention reporting.
+- **PowerShift & Optimization Rewind:**
+  - Documented Win32 PowrProf scheme enumeration (`PowerEnumerate`, `PowerReadFriendlyName`), active detection (`PowerGetActiveScheme`), AC/battery detection (`GetSystemPowerStatus`), and verified scheme activation (`PowerSetActiveScheme` + post-apply verification).
+  - Durable atomic `rewind-journal.json` with **compare-before-restore** (never overwriting external user power-scheme changes) and automatic startup crash recovery.
 
-- Prominent **PURGE STANDBY MEMORY** control.
-- Native `NtSetSystemInformation` call using information class 80 and `MemoryPurgeStandbyList` command 4.
-- One-shot UAC helper that accepts only the fixed standby-purge operation and enables only `SeProfileSingleProcessPrivilege`.
-- Explicit capability detection and a tested-build allowlist; unsupported builds keep monitoring but disable the action.
-- Serialized actions with real standby, free/zero, and available-memory snapshots before and after a 750 ms settling interval.
-- Typed helper lifecycle, optional raw `NTSTATUS`, request success, measured reduction, duration, elevation path, and bounded persistent history.
-- Helper timeout is never interpreted as native success; late completion remains explicitly possible and is reported.
-- Honest success-with-no-measurable-reduction reporting.
-
-## Monitoring foundation
-
-V4 adds a compact sidebar HUD with real CPU and existing RAM utilization, warm-up/stale states, a persisted show/hide preference, and keyboard-accessible compact disclosure. CPU is sampled with the native pipeline only when the HUD/dashboard is visible. GPU, FPS and frame time display unavailable; no capture engine is running. Foreground executable observation is now connected to cleaner exclusion evaluation using standard-user query rights.
-
-- Native `GlobalMemoryStatusEx` and `GetPerformanceInfo` collection.
-- Documented Windows low/high memory resource notifications.
-- PDH English counters for standby classes, free/zero pages, modified pages, and hard page reads.
-- Per-metric source, timestamp, interval, status, and failure detail.
-- Explainable Guardian pressure assessment kept separate from cleaner control.
-- Adaptive foreground/background sampling owned by Rust.
-- Versioned, validated, atomically replaced local settings.
-- System tray open, pause/resume, close-to-tray, explicit exit, and single instance.
-- Responsive Midnight CosmoTech™ Overview, Memory Explorer, Guardian, and Settings views.
-
-## P0 cleaner evolution
-
-- Automatic-cleaner settings are now versioned and persisted, remain off by default, and expose direct standby and Free & Zero thresholds, polling, cooldown, minimum interval, hourly limit, cleaner-only pause, and executable exclusions.
-- A deterministic policy evaluator enforces both threshold conditions and the configured safeguards independently of Guardian.
-- Unattended native execution is intentionally still disabled. A background threshold must not launch surprise UAC prompts; the next slice is an explicitly authorized, narrowly scoped session helper with authenticated local IPC.
-
-## Not implemented yet
-
-- Secure unattended automatic purge execution, independent cleaner scheduling, and monotonic cooldown reconciliation (policy, foreground exclusion observation and persistence are implemented; native automatic execution is not).
-- Low-priority-only standby purge, pending independent native validation.
-- Timer-resolution changes.
-- Game overlays, PresentMon, performance sessions, and performance-improvement claims.
-- Windows versions other than those actually tested and recorded in the compatibility document.
-
-## Development
+## Development & Verification
 
 Requirements: Windows 10/11 x64, WebView2, Node.js, Rust MSVC, Visual Studio C++ Build Tools, and a Windows SDK.
 
 ```powershell
-npm install
-npm run build
+npm ci
 npm test
+npm run build
+cargo fmt --manifest-path src-tauri\Cargo.toml -- --check
+cargo clippy --manifest-path src-tauri\Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path src-tauri\Cargo.toml
-npm run tauri dev
+npm run tauri build
 ```
 
-Create a native debug executable without an installer:
-
-```powershell
-npm run tauri build -- --debug --no-bundle
-```
-
-See [MEMFLUX_IMPLEMENTATION_PLAN.md](MEMFLUX_IMPLEMENTATION_PLAN.md) and [MEMFLUX_PERFORMANCE_EVOLUTION_V3_PLAN.md](MEMFLUX_PERFORMANCE_EVOLUTION_V3_PLAN.md) for live milestone status, measurable gates, current risks, and actual validation results.
+See [MEMFLUX_V4_1_BETA_EXECUTION_PLAN.md](MEMFLUX_V4_1_BETA_EXECUTION_PLAN.md) for the complete V4.1 implementation ledger, verification evidence, resource measurements, and beta gate evaluation.
 
 ## Safety and privacy
 
-Monitoring runs as a standard user. Manual cleaning requests UAC only for a one-shot helper in the same executable. The helper accepts no arbitrary shell command or path, installs no service or driver, and returns only its native status through the process exit code. MemFlux uploads no analytics or system telemetry. See [docs/SECURITY.md](docs/SECURITY.md).
-
-## Project maturity
-
-See [MEMFLUX_OMNIFLUX_V4_IMPLEMENTATION_PLAN.md](MEMFLUX_OMNIFLUX_V4_IMPLEMENTATION_PLAN.md) for the current incremental roadmap. The CPU/RAM HUD is an initial slice; GPU, FPS, trusted-counter comparison, resource profiling and visual QA remain required for the full HUD gate.
-
-P0 hardening alpha. Manual native purging is runtime-verified only on Windows 11 Home Insider Preview build 26340; other builds remain action-disabled until tested. Automatic policy is implemented but unattended authorization/execution is incomplete. Clearing cache is not a memory-leak fix and is not evidence of higher FPS or lower latency.
-
+Monitoring runs as a standard user. Manual cleaning requests UAC only for a fixed helper in the same executable, and automatic cleaning requires an explicitly authorized session helper accepting only fixed operations (`Ping`, `PurgeStandbyList`, `Shutdown`). MemFlux installs no kernel driver, performs no game-process injection, and uploads no analytics or telemetry. See [docs/SECURITY.md](docs/SECURITY.md).

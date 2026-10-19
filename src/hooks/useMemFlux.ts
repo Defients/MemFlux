@@ -1,6 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { native } from "../lib/native";
-import type { ActionRecord, AppSettings, RuntimeStatus, SettingsEnvelope, TelemetryFrame } from "../types";
+import type {
+  ActionRecord,
+  AppSettings,
+  GameProfile,
+  PowerShiftMode,
+  RuntimeStatus,
+  SettingsEnvelope,
+  TelemetryFrame
+} from "../types";
 
 const MAX_HISTORY = 90;
 
@@ -12,6 +20,7 @@ export function useMemFlux() {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [purging, setPurging] = useState(false);
+  const [authorizingSession, setAuthorizingSession] = useState(false);
   const [actionHistory, setActionHistory] = useState<ActionRecord[]>([]);
 
   const acceptAction = useCallback((record: ActionRecord) => {
@@ -27,6 +36,15 @@ export function useMemFlux() {
       if (current.at(-1)?.snapshot.sequence === next.snapshot.sequence) return current;
       return [...current, next].slice(-MAX_HISTORY);
     });
+  }, []);
+
+  const refreshRuntime = useCallback(async () => {
+    try {
+      const status = await native.runtimeStatus();
+      setRuntime(status);
+    } catch {
+      // ignore transient poll failure
+    }
   }, []);
 
   useEffect(() => {
@@ -94,13 +112,14 @@ export function useMemFlux() {
         warning: null,
         path: current?.path ?? ""
       }));
+      await refreshRuntime();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
       throw reason;
     } finally {
       setSaving(false);
     }
-  }, []);
+  }, [refreshRuntime]);
 
   const purgeStandby = useCallback(async () => {
     setPurging(true);
@@ -108,6 +127,7 @@ export function useMemFlux() {
     try {
       const record = await native.purgeStandby();
       acceptAction(record);
+      await refreshRuntime();
       return record;
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -115,7 +135,117 @@ export function useMemFlux() {
     } finally {
       setPurging(false);
     }
-  }, [acceptAction]);
+  }, [acceptAction, refreshRuntime]);
+
+  const authorizeCleanerSession = useCallback(async () => {
+    setAuthorizingSession(true);
+    setError(null);
+    try {
+      const sessionStatus = await native.authorizeCleanerSession();
+      await refreshRuntime();
+      return sessionStatus;
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+      throw reason;
+    } finally {
+      setAuthorizingSession(false);
+    }
+  }, [refreshRuntime]);
+
+  const revokeCleanerSession = useCallback(async () => {
+    setError(null);
+    try {
+      const sessionStatus = await native.revokeCleanerSession();
+      await refreshRuntime();
+      return sessionStatus;
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+      throw reason;
+    }
+  }, [refreshRuntime]);
+
+  const applyPowerShift = useCallback(async (mode: PowerShiftMode, customGuid?: string | null, allowOnBattery?: boolean) => {
+    setError(null);
+    try {
+      const outcome = await native.applyPowerShiftMode(mode, customGuid, allowOnBattery);
+      const coord = await native.coordinatorSnapshot();
+      setFrame((curr) => curr ? { ...curr, coordinator: coord } : curr);
+      return outcome;
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+      throw reason;
+    }
+  }, []);
+
+  const restoreRewindEntry = useCallback(async (actionId: string) => {
+    setError(null);
+    try {
+      const entry = await native.restoreRewindEntry(actionId);
+      const coord = await native.coordinatorSnapshot();
+      setFrame((curr) => curr ? { ...curr, coordinator: coord } : curr);
+      return entry;
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+      throw reason;
+    }
+  }, []);
+
+  const restoreAllRewind = useCallback(async () => {
+    setError(null);
+    try {
+      const entries = await native.restoreAllRewind();
+      const coord = await native.coordinatorSnapshot();
+      setFrame((curr) => curr ? { ...curr, coordinator: coord } : curr);
+      return entries;
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+      throw reason;
+    }
+  }, []);
+
+  const activateGameFocus = useCallback(async (profile: GameProfile, pid: number | null, executablePath: string) => {
+    setError(null);
+    try {
+      await native.activateGameFocusSession(profile, pid, executablePath);
+      const coord = await native.coordinatorSnapshot();
+      setFrame((curr) => curr ? { ...curr, coordinator: coord } : curr);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+      throw reason;
+    }
+  }, []);
+
+  const deactivateGameFocus = useCallback(async () => {
+    setError(null);
+    try {
+      await native.deactivateGameFocusSession();
+      const coord = await native.coordinatorSnapshot();
+      setFrame((curr) => curr ? { ...curr, coordinator: coord } : curr);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+      throw reason;
+    }
+  }, []);
+
+  const startFpsCapture = useCallback(async (pid: number, executableName: string) => {
+    setError(null);
+    try {
+      const status = await native.startFpsCapture(pid, executableName);
+      setFrame((curr) => curr ? { ...curr, fpsCapture: status } : curr);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }, []);
+
+  const stopFpsCapture = useCallback(async () => {
+    setError(null);
+    try {
+      const status = await native.stopFpsCapture();
+      setFrame((curr) => curr ? { ...curr, fpsCapture: status } : curr);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }, []);
 
   return useMemo(() => ({
     frame,
@@ -125,10 +255,41 @@ export function useMemFlux() {
     error,
     saving,
     purging,
+    authorizingSession,
     actionHistory,
     setPaused,
     saveSettings,
-    purgeStandby
-  }), [frame, history, settingsEnvelope, runtime, error, saving, purging, actionHistory, setPaused, saveSettings, purgeStandby]);
+    purgeStandby,
+    authorizeCleanerSession,
+    revokeCleanerSession,
+    applyPowerShift,
+    restoreRewindEntry,
+    restoreAllRewind,
+    activateGameFocus,
+    deactivateGameFocus,
+    startFpsCapture,
+    stopFpsCapture
+  }), [
+    frame,
+    history,
+    settingsEnvelope,
+    runtime,
+    error,
+    saving,
+    purging,
+    authorizingSession,
+    actionHistory,
+    setPaused,
+    saveSettings,
+    purgeStandby,
+    authorizeCleanerSession,
+    revokeCleanerSession,
+    applyPowerShift,
+    restoreRewindEntry,
+    restoreAllRewind,
+    activateGameFocus,
+    deactivateGameFocus,
+    startFpsCapture,
+    stopFpsCapture
+  ]);
 }
-

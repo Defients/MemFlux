@@ -1,6 +1,13 @@
-use crate::action::{self, ActionCapability, OPERATION_PURGE_STANDBY};
-use crate::cleaner::{CleanerDecision, CleanerInputs, CleanerPolicy};
+use crate::action::{self, ActionCapability, CleanerSessionStatus, OPERATION_PURGE_STANDBY};
+use crate::cleaner::{CleanerDecision, CleanerInputs, CleanerPolicy, CleanerStatusSummary};
+use crate::coordinator::{CoordinatorSnapshot, OptimizationCoordinator};
+use crate::gamefocus::{GameFocusStatus, GameProfile};
 use crate::guardian::{GuardianDecision, GuardianEvaluator};
+use crate::performance::{
+    CpuSensor, FpsCaptureStatus, GpuSensor, GpuTelemetry, PresentMonController,
+};
+use crate::powershift::{PowerShiftMode, PowerShiftOutcome};
+use crate::rewind::RewindEntry;
 use crate::settings::{AppSettings, SettingsEnvelope, SettingsStore};
 use crate::telemetry::{Collector, MemorySnapshot, PlatformCollector};
 use serde::{Deserialize, Serialize};
@@ -22,9 +29,9 @@ const EVENT_ACTION: &str = "action://result";
 const ACTION_HISTORY_LIMIT: usize = 100;
 static ACTION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-fn action_id(timestamp: u64) -> String {
+fn action_id(origin: &str, timestamp: u64) -> String {
     format!(
-        "manual-{timestamp}-{}",
+        "{origin}-{timestamp}-{}",
         ACTION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     )
 }
@@ -33,9 +40,13 @@ fn action_id(timestamp: u64) -> String {
 #[serde(rename_all = "camelCase")]
 pub struct TelemetryFrame {
     pub cpu_utilization: crate::telemetry::Metric,
+    pub gpu_telemetry: GpuTelemetry,
+    pub fps_capture: FpsCaptureStatus,
     pub snapshot: MemorySnapshot,
     pub guardian: GuardianDecision,
     pub cleaner_decision: CleanerDecision,
+    pub cleaner_status: CleanerStatusSummary,
+    pub coordinator: CoordinatorSnapshot,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -44,6 +55,8 @@ struct RuntimeStatus {
     paused: bool,
     cleaner_paused: bool,
     cleaner_decision: CleanerDecision,
+    cleaner_status: CleanerStatusSummary,
+    cleaner_session: CleanerSessionStatus,
     automatic_execution_ready: bool,
     action_capability: ActionCapability,
 }
@@ -86,18 +99,41 @@ struct ControlState {
 pub struct AppState {
     control: Mutex<ControlState>,
     wake: Condvar,
+    cleaner_wake: Condvar,
     latest: RwLock<Option<TelemetryFrame>>,
     settings_store: SettingsStore,
     settings_warning: Mutex<Option<String>>,
     action_lock: Mutex<()>,
     action_history: Mutex<VecDeque<ActionRecord>>,
     action_history_path: PathBuf,
+    cleaner_quota_path: PathBuf,
+    cleaner_policy: Mutex<CleanerPolicy>,
     cleaner_decision: RwLock<CleanerDecision>,
+    cleaner_status: RwLock<CleanerStatusSummary>,
+    coordinator: Mutex<OptimizationCoordinator>,
+    presentmon: Mutex<PresentMonController>,
 }
 
 impl AppState {
-    fn new(store: SettingsStore, envelope: SettingsEnvelope, action_history_path: PathBuf) -> Self {
+    fn new(
+        store: SettingsStore,
+        envelope: SettingsEnvelope,
+        action_history_path: PathBuf,
+        cleaner_quota_path: PathBuf,
+        rewind_path: PathBuf,
+    ) -> Self {
         let action_history = load_action_history(&action_history_path);
+        let mut cleaner_policy = CleanerPolicy::default();
+        cleaner_policy.load_quota_file(
+            &cleaner_quota_path,
+            action_history
+                .iter()
+                .filter(|record| record.native_request_succeeded)
+                .map(|record| record.timestamp_ms.saturating_add(record.duration_ms)),
+        );
+        let now_ms = crate::telemetry::timestamp_ms();
+        let coordinator = OptimizationCoordinator::new(rewind_path, now_ms);
+
         Self {
             control: Mutex::new(ControlState {
                 settings: envelope.settings,
@@ -105,13 +141,19 @@ impl AppState {
                 shutdown: false,
             }),
             wake: Condvar::new(),
+            cleaner_wake: Condvar::new(),
             latest: RwLock::new(None),
             settings_store: store,
             settings_warning: Mutex::new(envelope.warning),
             action_lock: Mutex::new(()),
             action_history: Mutex::new(action_history),
             action_history_path,
+            cleaner_quota_path,
+            cleaner_policy: Mutex::new(cleaner_policy),
             cleaner_decision: RwLock::new(CleanerDecision::Disabled),
+            cleaner_status: RwLock::new(CleanerStatusSummary::default()),
+            coordinator: Mutex::new(coordinator),
+            presentmon: Mutex::new(PresentMonController::new()),
         }
     }
 
@@ -119,6 +161,11 @@ impl AppState {
         if let Ok(mut control) = self.control.lock() {
             control.shutdown = true;
             self.wake.notify_all();
+            self.cleaner_wake.notify_all();
+        }
+        let _ = action::revoke_cleaner_session();
+        if let Ok(mut pm) = self.presentmon.lock() {
+            pm.stop_capture();
         }
     }
 
@@ -130,6 +177,7 @@ impl AppState {
         control.paused = !control.paused;
         let paused = control.paused;
         self.wake.notify_all();
+        self.cleaner_wake.notify_all();
         paused
     }
 }
@@ -182,6 +230,7 @@ fn update_settings(
         .lock()
         .unwrap_or_else(|error| error.into_inner()) = None;
     state.wake.notify_all();
+    state.cleaner_wake.notify_all();
     log::info!("Settings updated and persisted.");
     Ok(persisted)
 }
@@ -200,6 +249,7 @@ fn set_monitoring_paused(
         control.paused = paused;
     }
     state.wake.notify_all();
+    state.cleaner_wake.notify_all();
     let _ = app.emit(EVENT_MONITORING, !paused);
     update_tray_tooltip(&app, paused, None);
     log::info!(
@@ -211,26 +261,32 @@ fn set_monitoring_paused(
 
 #[tauri::command]
 fn get_runtime_status(state: State<'_, Arc<AppState>>) -> RuntimeStatus {
-    let paused = state
-        .control
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .paused;
-    RuntimeStatus {
-        paused,
-        cleaner_paused: state
+    let (paused, cleaner_paused) = {
+        let control = state
             .control
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .settings
-            .cleaner_paused,
+            .unwrap_or_else(|error| error.into_inner());
+        (control.paused, control.settings.cleaner_paused)
+    };
+    let cleaner_session = action::cleaner_session_status();
+    let action_capability = action::capability();
+    let automatic_execution_ready = cleaner_session.authorized && action_capability.supported;
+    RuntimeStatus {
+        paused,
+        cleaner_paused,
         cleaner_decision: state
             .cleaner_decision
             .read()
             .unwrap_or_else(|error| error.into_inner())
             .clone(),
-        automatic_execution_ready: false,
-        action_capability: action::capability(),
+        cleaner_status: state
+            .cleaner_status
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone(),
+        cleaner_session,
+        automatic_execution_ready,
+        action_capability,
     }
 }
 
@@ -251,12 +307,180 @@ async fn purge_standby_memory(
     state: State<'_, Arc<AppState>>,
 ) -> Result<ActionRecord, String> {
     let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || run_manual_purge(&app, &state))
+    tauri::async_runtime::spawn_blocking(move || run_standby_purge(&app, &state, "manual"))
         .await
         .map_err(|error| format!("Standby purge worker failed: {error}"))
 }
 
-fn run_manual_purge(app: &tauri::AppHandle, state: &Arc<AppState>) -> ActionRecord {
+#[tauri::command]
+async fn authorize_cleaner_session(
+    state: State<'_, Arc<AppState>>,
+) -> Result<CleanerSessionStatus, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let status = action::authorize_cleaner_session();
+        state.cleaner_wake.notify_all();
+        state.wake.notify_all();
+        status
+    })
+    .await
+    .map_err(|error| format!("Cleaner session authorization worker failed: {error}"))
+}
+
+#[tauri::command]
+fn revoke_cleaner_session(state: State<'_, Arc<AppState>>) -> CleanerSessionStatus {
+    let status = action::revoke_cleaner_session();
+    state.cleaner_wake.notify_all();
+    state.wake.notify_all();
+    status
+}
+
+#[tauri::command]
+fn get_coordinator_snapshot(state: State<'_, Arc<AppState>>) -> CoordinatorSnapshot {
+    state
+        .coordinator
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .snapshot()
+}
+
+#[tauri::command]
+fn apply_powershift_mode(
+    mode: PowerShiftMode,
+    custom_guid: Option<String>,
+    allow_on_battery: Option<bool>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<PowerShiftOutcome, String> {
+    let battery_allowed = allow_on_battery.unwrap_or_else(|| {
+        state
+            .control
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .settings
+            .powershift_allow_on_battery
+    });
+    let now_ms = crate::telemetry::timestamp_ms();
+    let mut coord = state
+        .coordinator
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    coord.apply_manual_powershift(mode, custom_guid.as_deref(), battery_allowed, now_ms)
+}
+
+#[tauri::command]
+fn restore_rewind_entry(
+    action_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<RewindEntry, String> {
+    let now_ms = crate::telemetry::timestamp_ms();
+    let mut coord = state
+        .coordinator
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    coord.restore_rewind_entry(&action_id, now_ms)
+}
+
+#[tauri::command]
+fn restore_all_rewind(state: State<'_, Arc<AppState>>) -> Vec<RewindEntry> {
+    let now_ms = crate::telemetry::timestamp_ms();
+    let mut coord = state
+        .coordinator
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    coord.restore_all_rewind(now_ms)
+}
+
+#[tauri::command]
+fn activate_gamefocus_session(
+    profile: GameProfile,
+    pid: Option<u32>,
+    executable_path: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<GameFocusStatus, String> {
+    let settings = state
+        .control
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .settings
+        .clone();
+    let now_ms = crate::telemetry::timestamp_ms();
+    let status = {
+        let mut coord = state
+            .coordinator
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        coord.activate_gamefocus_session(
+            profile.clone(),
+            pid,
+            executable_path.clone(),
+            settings.powershift_allow_on_battery,
+            now_ms,
+        )?
+    };
+    if profile.auto_fps_capture
+        && settings.fps_capture_permitted
+        && let Some(target_pid) = pid
+        && let Ok(mut pm) = state.presentmon.lock()
+    {
+        let _ = pm.start_capture(target_pid, executable_path, true);
+    }
+    state.cleaner_wake.notify_all();
+    Ok(status)
+}
+
+#[tauri::command]
+fn deactivate_gamefocus_session(state: State<'_, Arc<AppState>>) -> GameFocusStatus {
+    let now_ms = crate::telemetry::timestamp_ms();
+    let status = {
+        let mut coord = state
+            .coordinator
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        coord.deactivate_gamefocus_and_restore("Deactivated by user request.", now_ms)
+    };
+    if let Ok(mut pm) = state.presentmon.lock() {
+        pm.stop_capture();
+    }
+    state.cleaner_wake.notify_all();
+    status
+}
+
+#[tauri::command]
+fn start_fps_capture(
+    pid: u32,
+    executable_name: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<FpsCaptureStatus, String> {
+    let permitted = state
+        .control
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .settings
+        .fps_capture_permitted;
+    let mut pm = state
+        .presentmon
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    pm.start_capture(pid, executable_name, permitted)
+}
+
+#[tauri::command]
+fn stop_fps_capture(state: State<'_, Arc<AppState>>) -> FpsCaptureStatus {
+    let permitted = state
+        .control
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .settings
+        .fps_capture_permitted;
+    let mut pm = state
+        .presentmon
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    pm.stop_capture();
+    pm.status(1_000, permitted)
+}
+
+fn run_standby_purge(app: &tauri::AppHandle, state: &Arc<AppState>, origin: &str) -> ActionRecord {
     let timestamp = crate::telemetry::timestamp_ms();
     let started = Instant::now();
     let Ok(_guard) = state.action_lock.try_lock() else {
@@ -264,9 +488,9 @@ fn run_manual_purge(app: &tauri::AppHandle, state: &Arc<AppState>) -> ActionReco
             app,
             state,
             ActionRecord {
-                id: action_id(timestamp),
+                id: action_id(origin, timestamp),
                 timestamp_ms: timestamp,
-                origin: "manual".into(),
+                origin: origin.into(),
                 operation: OPERATION_PURGE_STANDBY.into(),
                 outcome: "skipped_busy".into(),
                 native_request_succeeded: false,
@@ -290,9 +514,9 @@ fn run_manual_purge(app: &tauri::AppHandle, state: &Arc<AppState>) -> ActionReco
             app,
             state,
             ActionRecord {
-                id: action_id(timestamp),
+                id: action_id(origin, timestamp),
                 timestamp_ms: timestamp,
-                origin: "manual".into(),
+                origin: origin.into(),
                 operation: OPERATION_PURGE_STANDBY.into(),
                 outcome: "unsupported".into(),
                 native_request_succeeded: false,
@@ -318,9 +542,9 @@ fn run_manual_purge(app: &tauri::AppHandle, state: &Arc<AppState>) -> ActionReco
             app,
             state,
             ActionRecord {
-                id: action_id(timestamp),
+                id: action_id(origin, timestamp),
                 timestamp_ms: timestamp,
-                origin: "manual".into(),
+                origin: origin.into(),
                 operation: OPERATION_PURGE_STANDBY.into(),
                 outcome: "telemetry_unavailable".into(),
                 native_request_succeeded: false,
@@ -338,14 +562,34 @@ fn run_manual_purge(app: &tauri::AppHandle, state: &Arc<AppState>) -> ActionReco
         );
     }
 
-    log::info!("Manual standby purge requested; awaiting the narrow elevated helper if required.");
-    let native = action::execute_standby_purge();
+    log::info!(
+        "{origin} standby purge requested; using authenticated session helper or narrow helper."
+    );
+    let native = if origin == "automatic" {
+        action::execute_automatic_standby_purge()
+    } else {
+        action::execute_standby_purge()
+    };
+
     let after = if native.request_succeeded {
         std::thread::sleep(Duration::from_millis(750));
         Some(measurement(&collector.collect(0, 750)))
     } else {
         None
     };
+
+    if native.request_succeeded {
+        let completed_ms = timestamp.saturating_add(started.elapsed().as_millis() as u64);
+        let mut policy = state
+            .cleaner_policy
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        policy.record_completed_purge_monotonic(completed_ms, Instant::now());
+        if let Err(err) = policy.persist_quota_file(&state.cleaner_quota_path) {
+            log::warn!("Could not persist cleaner quota ledger: {err}");
+        }
+    }
+
     let reduction = after.as_ref().and_then(|after| {
         before
             .standby_bytes
@@ -374,9 +618,9 @@ fn run_manual_purge(app: &tauri::AppHandle, state: &Arc<AppState>) -> ActionReco
         app,
         state,
         ActionRecord {
-            id: action_id(timestamp),
+            id: action_id(origin, timestamp),
             timestamp_ms: timestamp,
-            origin: "manual".into(),
+            origin: origin.into(),
             operation: OPERATION_PURGE_STANDBY.into(),
             outcome: outcome.into(),
             native_request_succeeded: native.request_succeeded,
@@ -419,8 +663,6 @@ fn record_action(
             history.pop_front();
         }
         history.push_back(record.clone());
-        // Hold the history lock through replacement so simultaneous skipped and
-        // completed actions cannot race or persist an older snapshot last.
         if let Err(error) = persist_action_history(&state.action_history_path, &history) {
             log::warn!("Could not persist action history: {error}");
         }
@@ -429,7 +671,8 @@ fn record_action(
         log::warn!("Could not emit action result: {error}");
     }
     log::info!(
-        "Memory action completed: outcome={}, native_success={}, ntstatus={:?}, reduction_bytes={:?}",
+        "Memory action completed: origin={}, outcome={}, native_success={}, ntstatus={:?}, reduction_bytes={:?}",
+        record.origin,
         record.outcome,
         record.native_request_succeeded,
         record.nt_status_hex,
@@ -520,15 +763,129 @@ fn update_tray_tooltip(app: &tauri::AppHandle, paused: bool, pressure: Option<&s
     }
 }
 
+fn spawn_cleaner_scheduler(app: tauri::AppHandle, state: Arc<AppState>) {
+    std::thread::Builder::new()
+        .name("memflux-cleaner".into())
+        .spawn(move || {
+            let mut collector = PlatformCollector::new();
+            let mut sequence = 0_u64;
+
+            loop {
+                let (settings, shutdown) = {
+                    let control = state
+                        .control
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    (control.settings.clone(), control.shutdown)
+                };
+                if shutdown {
+                    log::info!("Independent cleaner scheduler stopped cleanly.");
+                    break;
+                }
+
+                let poll_interval = settings.cleaner_poll_interval_ms.clamp(1_000, 60_000);
+                let now_ms = crate::telemetry::timestamp_ms();
+                let now_instant = Instant::now();
+
+                // Reuse cached telemetry snapshot if fresh within poll_interval, otherwise collect directly
+                let (standby_bytes, free_zero_bytes) = {
+                    let cached = state
+                        .latest
+                        .read()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .as_ref()
+                        .and_then(|frame| {
+                            if now_ms.saturating_sub(frame.snapshot.timestamp_ms) <= poll_interval {
+                                Some((
+                                    frame.snapshot.standby_bytes.value,
+                                    frame.snapshot.free_zero_bytes.value,
+                                ))
+                            } else {
+                                None
+                            }
+                        });
+                    match cached {
+                        Some(pair) => pair,
+                        None => {
+                            sequence = sequence.saturating_add(1);
+                            let snap = collector.collect(sequence, poll_interval);
+                            (snap.standby_bytes.value, snap.free_zero_bytes.value)
+                        }
+                    }
+                };
+
+                let foreground = if settings.cleaner_excluded_applications.is_empty() {
+                    None
+                } else {
+                    crate::performance::foreground_executable()
+                };
+                let session_status = action::cleaner_session_status();
+                let capability = action::capability();
+                let action_busy = state.action_lock.try_lock().is_err();
+                let session_override = state
+                    .coordinator
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .cleaner_override();
+
+                let summary = {
+                    let mut policy = state
+                        .cleaner_policy
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner());
+                    policy.evaluate_summary(
+                        &settings,
+                        CleanerInputs {
+                            now_ms,
+                            now_instant,
+                            standby_bytes,
+                            free_zero_bytes,
+                            foreground_executable: foreground.as_deref(),
+                            authorization_ready: session_status.authorized,
+                            build_supported: capability.supported,
+                            action_in_progress: action_busy,
+                            session_override,
+                        },
+                    )
+                };
+
+                *state
+                    .cleaner_decision
+                    .write()
+                    .unwrap_or_else(|error| error.into_inner()) = summary.decision.clone();
+                *state
+                    .cleaner_status
+                    .write()
+                    .unwrap_or_else(|error| error.into_inner()) = summary.clone();
+
+                if summary.decision == CleanerDecision::Trigger && !action_busy {
+                    let _ = run_standby_purge(&app, &state, "automatic");
+                }
+
+                let control = state
+                    .control
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                if control.shutdown {
+                    break;
+                }
+                let _ = state
+                    .cleaner_wake
+                    .wait_timeout(control, Duration::from_millis(poll_interval))
+                    .unwrap_or_else(|error| error.into_inner());
+            }
+        })
+        .expect("failed to start independent cleaner scheduler thread");
+}
+
 fn spawn_sampler(app: tauri::AppHandle, state: Arc<AppState>) {
     std::thread::Builder::new()
         .name("memflux-telemetry".into())
         .spawn(move || {
             let mut collector = PlatformCollector::new();
-            let mut cpu = crate::performance::CpuSensor::default();
+            let mut cpu = CpuSensor::default();
+            let mut gpu = GpuSensor::default();
             let mut guardian = GuardianEvaluator::new();
-            let mut cleaner = CleanerPolicy::default();
-            let mut last_cleaner_evaluation_ms = 0_u64;
             let mut sequence = 0_u64;
 
             loop {
@@ -558,39 +915,87 @@ fn spawn_sampler(app: tauri::AppHandle, state: Arc<AppState>) {
                     sequence = sequence.saturating_add(1);
                     let snapshot = collector.collect(sequence, interval_ms);
                     let decision = guardian.evaluate(&snapshot, settings.guardian_enabled);
-                    let mut frame = TelemetryFrame {
-                        cpu_utilization: cpu.collect(interval_ms, window_visible && settings.performance_hud_enabled),
+                    let hud_active = window_visible && settings.performance_hud_enabled;
+                    let cpu_metric = cpu.collect(interval_ms, hud_active && settings.hud_show_cpu);
+                    let gpu_telemetry = gpu.collect(
+                        interval_ms,
+                        (hud_active && settings.hud_show_gpu) || settings.gamefocus_enabled,
+                        &settings.hud_selected_gpu,
+                    );
+                    let fps_capture = state
+                        .presentmon
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .status(interval_ms, settings.fps_capture_permitted);
+
+                    let fg_process = if settings.gamefocus_enabled {
+                        crate::performance::foreground_window_process()
+                    } else {
+                        None
+                    };
+
+                    let coordinator_snapshot = {
+                        let mut coord = state
+                            .coordinator
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner());
+                        coord.tick(
+                            &settings,
+                            fg_process,
+                            |pid| {
+                                #[cfg(target_os = "windows")]
+                                {
+                                    use windows::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+                                    use windows::Win32::System::Threading::{
+                                        GetExitCodeProcess, OpenProcess,
+                                        PROCESS_QUERY_LIMITED_INFORMATION,
+                                    };
+                                    let Ok(h) = (unsafe {
+                                        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+                                    }) else {
+                                        return false;
+                                    };
+                                    let mut code = 0_u32;
+                                    let alive =
+                                        unsafe { GetExitCodeProcess(h, &mut code) }.is_ok()
+                                            && code == STILL_ACTIVE.0 as u32;
+                                    let _ = unsafe { CloseHandle(h) };
+                                    alive
+                                }
+                                #[cfg(not(target_os = "windows"))]
+                                {
+                                    let _ = pid;
+                                    false
+                                }
+                            },
+                            &gpu_telemetry.per_process_gpu_percent,
+                            snapshot.timestamp_ms,
+                        );
+                        coord.snapshot()
+                    };
+
+                    let cleaner_decision = state
+                        .cleaner_decision
+                        .read()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .clone();
+                    let cleaner_status = state
+                        .cleaner_status
+                        .read()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .clone();
+
+                    let frame = TelemetryFrame {
+                        cpu_utilization: cpu_metric,
+                        gpu_telemetry,
+                        fps_capture,
                         snapshot,
                         guardian: decision,
-                        cleaner_decision: state.cleaner_decision.read()
-                            .unwrap_or_else(|error| error.into_inner()).clone(),
+                        cleaner_decision,
+                        cleaner_status,
+                        coordinator: coordinator_snapshot,
                     };
-                    let now_ms = frame.snapshot.timestamp_ms;
-                    if now_ms.saturating_sub(last_cleaner_evaluation_ms)
-                        >= settings.cleaner_poll_interval_ms
-                    {
-                        cleaner.restore_completed_purges(state.action_history.lock()
-                            .unwrap_or_else(|error| error.into_inner()).iter()
-                            .filter(|record| record.native_request_succeeded)
-                            .map(|record| record.timestamp_ms.saturating_add(record.duration_ms)));
-                        let foreground = if settings.cleaner_excluded_applications.is_empty() { None } else { crate::performance::foreground_executable() };
-                        let cleaner_decision = cleaner.evaluate(
-                            &settings,
-                            CleanerInputs {
-                                now_ms,
-                                standby_bytes: frame.snapshot.standby_bytes.value,
-                                free_zero_bytes: frame.snapshot.free_zero_bytes.value,
-                                foreground_executable: foreground.as_deref(),
-                                authorization_ready: false,
-                            },
-                        );
-                        *state
-                            .cleaner_decision
-                            .write()
-                            .unwrap_or_else(|error| error.into_inner()) = cleaner_decision.clone();
-                        frame.cleaner_decision = cleaner_decision;
-                        last_cleaner_evaluation_ms = now_ms;
-                    }
+
                     if sequence == 1 || sequence.is_multiple_of(60) {
                         log::info!(
                             "Telemetry milestone: sequence={sequence}, collection={:?}, pressure={:?}, available_bytes={:?}, commit_percent={:?}, standby_bytes={:?}, page_reads_per_second={:?}",
@@ -606,9 +1011,8 @@ fn spawn_sampler(app: tauri::AppHandle, state: Arc<AppState>) {
                         .latest
                         .write()
                         .unwrap_or_else(|error| error.into_inner()) = Some(frame.clone());
-                    if window_visible
-                        && let Err(error) = app.emit(EVENT_FRAME, &frame) {
-                            log::warn!("Could not emit telemetry frame: {error}");
+                    if window_visible && let Err(error) = app.emit(EVENT_FRAME, &frame) {
+                        log::warn!("Could not emit telemetry frame: {error}");
                     }
                     update_tray_tooltip(
                         &app,
@@ -617,6 +1021,7 @@ fn spawn_sampler(app: tauri::AppHandle, state: Arc<AppState>) {
                     );
                 } else {
                     cpu.collect(interval_ms, false);
+                    gpu.collect(interval_ms, false, "auto");
                     guardian.reset();
                 }
 
@@ -700,22 +1105,41 @@ pub fn run() {
             set_monitoring_paused,
             get_runtime_status,
             get_action_history,
-            purge_standby_memory
+            purge_standby_memory,
+            authorize_cleaner_session,
+            revoke_cleaner_session,
+            get_coordinator_snapshot,
+            apply_powershift_mode,
+            restore_rewind_entry,
+            restore_all_rewind,
+            activate_gamefocus_session,
+            deactivate_gamefocus_session,
+            start_fps_capture,
+            stop_fps_capture
         ])
         .setup(|app| {
             let config_dir = app.path().app_config_dir()?;
             let settings_path = config_dir.join("settings.json");
             let action_history_path = config_dir.join("action-history.json");
+            let cleaner_quota_path = config_dir.join("cleaner-quota.json");
+            let rewind_path = config_dir.join("rewind-journal.json");
             let store = SettingsStore::new(settings_path);
             let envelope = store.load();
             if let Some(warning) = &envelope.warning {
                 log::warn!("{warning}");
             }
-            let state = Arc::new(AppState::new(store, envelope, action_history_path));
+            let state = Arc::new(AppState::new(
+                store,
+                envelope,
+                action_history_path,
+                cleaner_quota_path,
+                rewind_path,
+            ));
             app.manage(state.clone());
             build_tray(app)?;
+            spawn_cleaner_scheduler(app.handle().clone(), state.clone());
             spawn_sampler(app.handle().clone(), state);
-            log::info!("MemFlux Phase 1 monitoring runtime started.");
+            log::info!("MemFlux V4.1 runtime started.");
             Ok(())
         })
         .on_window_event(|window, event| {

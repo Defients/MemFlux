@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "MemFlux — Standby Memory Cleaner",
+        "title": "MemFlux — Standby Memory Cleaner & Performance Control",
         "width": 1240,
         "height": 800,
         "minWidth": 900,
@@ -29,14 +29,29 @@
     }
   },
   "bundle": {
-    "active": false,
-    "targets": "all",
+    "active": true,
+    "targets": ["nsis", "msi"],
+    "publisher": "CosmoTech",
+    "copyright": "Copyright © 2026 CosmoTech",
+    "category": "Utility",
+    "shortDescription": "Windows standby memory cleaner with GameFocus and reversible PowerShift control",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "",
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
   }
 }
-
