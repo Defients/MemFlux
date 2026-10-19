@@ -31,3 +31,10 @@ This directory is a local mirror of the ChatGPT project “MemFlux”.
 - Before claiming Windows functionality verified, record edition/build, elevation state, exact mechanism, raw native result, counter evidence, and method. Do not generalize one Insider-build result to Windows 10/11 broadly.
 - Update `MEMFLUX_IMPLEMENTATION_PLAN.md`, relevant docs, and `CHANGELOG.md` as milestones change. Mark implemented, tested, partial, untested, and blocked status explicitly.
 - Preserve user changes and the read-only `sources/` boundary. Avoid destructive Git and filesystem operations.
+
+### Performance Evolution V3 continuity
+
+- Treat helper launch, UAC cancellation, Win32 wait outcome, timeout, exit-code retrieval, native `NTSTATUS`, request acceptance, and measured effect as separate typed facts. `WAIT_TIMEOUT` (`0x102`) is never a native success and does not mean the helper was terminated.
+- Keep automatic cleaner evaluation off by default and independent from Guardian. Never initiate UAC from a background threshold trigger; unattended execution requires an explicitly authorized, fixed-operation session helper with authenticated local IPC.
+- Do not begin mutable GameFocus or PowerShift controls until the P0 cleaner acceptance gate in `MEMFLUX_PERFORMANCE_EVOLUTION_V3_PLAN.md` passes.
+- New performance features must distinguish action execution, observed state change, workload performance change, and confidence. Preserve exact restoration state for every reversible change.

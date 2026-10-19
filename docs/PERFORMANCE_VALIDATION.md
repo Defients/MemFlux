@@ -17,6 +17,7 @@
 - Hand-authored SVG graph instead of a charting runtime.
 - No particle system, canvas loop, or continuously changing decorative background.
 - Release profile uses size optimization, LTO, one codegen unit, and stripping.
+- V3 P0 suppresses recurring telemetry events while the dashboard is hidden, keeping native collection and cache active. Its resource impact has not yet been measured; no memory or CPU reduction is claimed.
 
 ## Measurement protocol
 

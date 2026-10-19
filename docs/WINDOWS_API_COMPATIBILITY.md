@@ -9,6 +9,8 @@
 | Low/high system memory condition | `CreateMemoryResourceNotification`, `QueryMemoryResourceNotification` | Documented, Windows XP+ desktop | Standard user | Implemented; neutral band supported |
 | Standby/free/modified/page-read counters | PDH with `PdhAddEnglishCounterW` | Documented interface; counters can be absent | Standard user normally | Implemented with independent availability |
 | Full standby-list clearing | `NtSetSystemInformation(80, command 4)` | `NtSetSystemInformation` is documented as an ntdll export; class 80 and command 4 are private/compatibility-sensitive | `SeProfileSingleProcessPrivilege`; current filtered token does not hold it | Implemented behind build allowlist with one-shot UAC helper |
+| Helper completion wait | `WaitForSingleObject` | Documented Win32 synchronization result | Standard user | Typed separately; `WAIT_TIMEOUT` is never treated as `NTSTATUS` and does not terminate the helper |
+| Helper exit result | `GetExitCodeProcess` after signaled wait | Documented process API | Query right on returned handle | Fixed helper exit value becomes native status only after confirmed completion |
 | Low-priority standby clearing | Command 5 in public native-header research | Not independently validated here | Same privilege boundary expected | Not exposed |
 | Process working-set trimming | `EmptyWorkingSet` | Documented, but not standby clearing | Target process rights | Not used |
 | Timer-period request | `timeBeginPeriod` / `timeEndPeriod` | Documented, modern process-scoped semantics | Standard user | Planned research only; disabled |
@@ -23,6 +25,8 @@
 - Unelevated helper result: `STATUS_PRIVILEGE_NOT_HELD (0xC0000061)`.
 
 This host is not representative of stable Windows 10/11 releases. The action allowlist currently contains only build 26340; compile or runtime success here is not generalized.
+
+Capability reporting distinguishes confirmed supported, confirmed unsupported, unverified, privilege unavailable, and mechanism unavailable. An unlisted build remains unverified and action-disabled even if the export is present.
 
 ## Fallbacks
 
@@ -42,6 +46,8 @@ This host is not representative of stable Windows 10/11 releases. The action all
 - [NtSetSystemInformation](https://learn.microsoft.com/windows/win32/sysinfo/ntsetsysteminformation)
 - [AdjustTokenPrivileges](https://learn.microsoft.com/windows/win32/api/securitybaseapi/nf-securitybaseapi-adjusttokenprivileges)
 - [ShellExecuteEx / `runas`](https://learn.microsoft.com/windows/win32/api/shellapi/ns-shellapi-shellexecuteinfow)
+- [WaitForSingleObject](https://learn.microsoft.com/windows/win32/api/synchapi/nf-synchapi-waitforsingleobject)
+- [GetExitCodeProcess](https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-getexitcodeprocess)
 - [System Informer native header: class 80 and memory-list commands](https://github.com/winsiderss/phnt/blob/master/ntexapi.h)
 - [RAMMap](https://learn.microsoft.com/sysinternals/downloads/rammap)
 - [EmptyWorkingSet](https://learn.microsoft.com/windows/win32/api/psapi/nf-psapi-emptyworkingset)

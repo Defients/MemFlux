@@ -5,6 +5,18 @@
 
 ## Core functionality recovery — V2.0
 
+### V3 P0 continuation — 2026-10-18
+
+The current repository is an existing Git worktree at baseline `10fd1a7`, synchronized with `origin/main` before these changes. The blank-workspace findings below describe the original Phase 0 audit, not current reality. The detailed current inventory and gates live in `MEMFLUX_PERFORMANCE_EVOLUTION_V3_PLAN.md`.
+
+- Implemented: typed helper lifecycle and optional native status; timeout cannot become native success; retained pending-helper handle blocks duplicate launches after timeout in the current process.
+- Implemented: bounded atomic action-history persistence and schema-v2 cleaner settings, with default automatic evaluation disabled.
+- Implemented: deterministic dual-threshold policy, cooldown/minimum interval/hourly limit, historical manual-purge accounting, fail-closed exclusion handling, and observable current policy decision.
+- Implemented: hidden dashboard receives no recurring telemetry events; native monitoring and cached snapshots continue.
+- Partial: automatic policy evaluates on the monitoring cadence. Secure session authorization and unattended native execution remain incomplete. Foreground-process observation is absent, so configured exclusions produce `exclusion_status_unavailable`.
+- Untested: native timeout/late completion, UAC rejection, UI interaction, updated performance footprint, and stable Windows builds.
+- P1 remains gated on P0 automatic-execution acceptance.
+
 The earlier monitoring-first phase interpretation is superseded. MemFlux is not complete without a real standby-list purge.
 
 ### Milestone 1 — Working Cleaner
@@ -22,17 +34,17 @@ The earlier monitoring-first phase interpretation is superseded. MemFlux is not 
 
 ### Milestone 2 — ISLC Functional Parity
 
-**Status: not implemented**
+**Status: partially implemented; automatic native execution not accepted**
 
-Opt-in automatic cleaning, explicit standby/free-zero thresholds, polling, cooldown/minimum interval, maximum frequency, exclusions, cleaner-only pause, tray execution, and persistent action history remain the next milestone. Available physical memory must not substitute for Free & Zero Page List bytes.
+Settings, threshold evaluation, cooldown/minimum interval, maximum-frequency policy, exclusion matching, cleaner-only pause configuration, and persistent history are implemented. Secure automatic authorization/execution, foreground identity observation, independent cleaner scheduling, and native background-action verification remain required. Available physical memory must not substitute for Free & Zero Page List bytes.
 
 ## 1. Repository findings
 
-### Current reality
+### Original Phase 0 audit (historical)
 
 - The workspace was effectively blank at audit time. It contained only `AGENTS.md` and the read-only reference `sources/MASTER-DIRECTIVE-V1.0.txt`.
 - No package manifest, lockfile, Rust crate, application source, build scripts, assets, tests, CI, release configuration, TODOs, or earlier implementation existed.
-- The directory was not a Git worktree, so there was no Git status, history, branch, or prior work to preserve. This remains an explicit delivery limitation until the owner initializes or supplies the real repository.
+- At the original audit the directory was not a Git worktree. Source control was subsequently initialized and pushed to `Defients/MemFlux`; this is no longer a delivery limitation.
 - The host is Windows 11 Home Insider Preview, version 10.0.26340, x64. It has WebView2 155.0.4283.62, Windows SDK 10.0.26100.0, Visual Studio Build Tools, Node.js 24.21.0/npm 11.19.0, and Rust 1.99.0 MSVC.
 - Local counter probing succeeded for Available Bytes, Committed Bytes, Commit Limit, three standby-cache classes, Modified Page List Bytes, Free & Zero Page List Bytes, and Page Reads/sec.
 

@@ -9,11 +9,12 @@ MemFlux monitors local Windows memory state and can request one full standby-lis
 - Standard-user main process; no requested-execution-level elevation.
 - One-shot UAC launch of the same executable with exactly `--memflux-elevated-purge-standby`.
 - Helper accepts no arbitrary command or filesystem path, enables only `SeProfileSingleProcessPrivilege`, performs one native request, and returns raw `NTSTATUS` as its process exit code.
+- Helper launch, UAC cancellation, wait timeout/failure, exit-code retrieval, native status, and measurement are represented separately. A wait timeout carries no `NTSTATUS`, does not claim success, and warns that the helper may finish later.
 - No service, kernel driver, scheduled task, registry tweak, or privileged helper.
 - No arbitrary shell, process, filesystem, HTTP, or updater capability.
 - Tauri main-window capability is limited to `core:default`.
 - Explicit native commands accept only settings, pause state, or read requests.
-- Settings use a fixed app-config path, strict JSON fields, schema/version checks, numeric range validation, safe defaults, and atomic replacement.
+- Settings and bounded action history use fixed app-config paths, schema/version checks, numeric range validation, safe defaults, and atomic replacement.
 - Invalid settings remain preserved for diagnosis and are not silently overwritten at startup.
 - Logs describe application state and native failures; they do not intentionally record secrets or process contents.
 - No account, analytics, or uploaded telemetry.
@@ -29,5 +30,6 @@ The following remain prohibited: kernel drivers, security-feature disabling, com
 - Installer signing and update authenticity are not implemented.
 - Log retention policy needs validation before beta.
 - A dedicated penetration/security review has not occurred.
-- Stable Windows compatibility and controlled UAC-denial paths cannot be tested until a privileged helper legitimately exists.
+- Controlled UAC-denial and helper-timeout paths still need native interaction testing.
+- Automatic native execution is disabled until an explicitly authorized session helper with authenticated, fixed-operation IPC is implemented and reviewed. Background policy evaluation never opens UAC.
 

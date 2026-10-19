@@ -1,9 +1,14 @@
 use crate::action::{self, ActionCapability, OPERATION_PURGE_STANDBY};
+use crate::cleaner::{CleanerDecision, CleanerInputs, CleanerPolicy};
 use crate::guardian::{GuardianDecision, GuardianEvaluator};
 use crate::settings::{AppSettings, SettingsEnvelope, SettingsStore};
 use crate::telemetry::{Collector, MemorySnapshot, PlatformCollector};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -15,12 +20,21 @@ const EVENT_FRAME: &str = "telemetry://frame";
 const EVENT_MONITORING: &str = "monitoring://state";
 const EVENT_ACTION: &str = "action://result";
 const ACTION_HISTORY_LIMIT: usize = 100;
+static ACTION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn action_id(timestamp: u64) -> String {
+    format!(
+        "manual-{timestamp}-{}",
+        ACTION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    )
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TelemetryFrame {
     pub snapshot: MemorySnapshot,
     pub guardian: GuardianDecision,
+    pub cleaner_decision: CleanerDecision,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -28,10 +42,12 @@ pub struct TelemetryFrame {
 struct RuntimeStatus {
     paused: bool,
     cleaner_paused: bool,
+    cleaner_decision: CleanerDecision,
+    automatic_execution_ready: bool,
     action_capability: ActionCapability,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActionMeasurement {
     standby_bytes: Option<f64>,
@@ -39,7 +55,7 @@ pub struct ActionMeasurement {
     available_bytes: Option<f64>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActionRecord {
     id: String,
@@ -48,7 +64,9 @@ pub struct ActionRecord {
     operation: String,
     outcome: String,
     native_request_succeeded: bool,
+    native_lifecycle: String,
     elevation_used: bool,
+    late_completion_possible: bool,
     nt_status_hex: Option<String>,
     before: Option<ActionMeasurement>,
     after: Option<ActionMeasurement>,
@@ -72,10 +90,13 @@ pub struct AppState {
     settings_warning: Mutex<Option<String>>,
     action_lock: Mutex<()>,
     action_history: Mutex<VecDeque<ActionRecord>>,
+    action_history_path: PathBuf,
+    cleaner_decision: RwLock<CleanerDecision>,
 }
 
 impl AppState {
-    fn new(store: SettingsStore, envelope: SettingsEnvelope) -> Self {
+    fn new(store: SettingsStore, envelope: SettingsEnvelope, action_history_path: PathBuf) -> Self {
+        let action_history = load_action_history(&action_history_path);
         Self {
             control: Mutex::new(ControlState {
                 settings: envelope.settings,
@@ -87,7 +108,9 @@ impl AppState {
             settings_store: store,
             settings_warning: Mutex::new(envelope.warning),
             action_lock: Mutex::new(()),
-            action_history: Mutex::new(VecDeque::with_capacity(ACTION_HISTORY_LIMIT)),
+            action_history: Mutex::new(action_history),
+            action_history_path,
+            cleaner_decision: RwLock::new(CleanerDecision::Disabled),
         }
     }
 
@@ -144,14 +167,15 @@ fn update_settings(
     settings: AppSettings,
     state: State<'_, Arc<AppState>>,
 ) -> Result<AppSettings, String> {
-    let persisted = state.settings_store.save(&settings)?;
-    {
+    let persisted = {
         let mut control = state
             .control
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        let persisted = state.settings_store.save(&settings)?;
         control.settings = persisted.clone();
-    }
+        persisted
+    };
     *state
         .settings_warning
         .lock()
@@ -193,7 +217,18 @@ fn get_runtime_status(state: State<'_, Arc<AppState>>) -> RuntimeStatus {
         .paused;
     RuntimeStatus {
         paused,
-        cleaner_paused: false,
+        cleaner_paused: state
+            .control
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .settings
+            .cleaner_paused,
+        cleaner_decision: state
+            .cleaner_decision
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone(),
+        automatic_execution_ready: false,
         action_capability: action::capability(),
     }
 }
@@ -228,13 +263,15 @@ fn run_manual_purge(app: &tauri::AppHandle, state: &Arc<AppState>) -> ActionReco
             app,
             state,
             ActionRecord {
-                id: format!("manual-{timestamp}"),
+                id: action_id(timestamp),
                 timestamp_ms: timestamp,
                 origin: "manual".into(),
                 operation: OPERATION_PURGE_STANDBY.into(),
                 outcome: "skipped_busy".into(),
                 native_request_succeeded: false,
+                native_lifecycle: "not_started".into(),
                 elevation_used: false,
+                late_completion_possible: false,
                 nt_status_hex: None,
                 before: None,
                 after: None,
@@ -252,13 +289,15 @@ fn run_manual_purge(app: &tauri::AppHandle, state: &Arc<AppState>) -> ActionReco
             app,
             state,
             ActionRecord {
-                id: format!("manual-{timestamp}"),
+                id: action_id(timestamp),
                 timestamp_ms: timestamp,
                 origin: "manual".into(),
                 operation: OPERATION_PURGE_STANDBY.into(),
                 outcome: "unsupported".into(),
                 native_request_succeeded: false,
+                native_lifecycle: "unsupported".into(),
                 elevation_used: false,
+                late_completion_possible: false,
                 nt_status_hex: None,
                 before: None,
                 after: None,
@@ -278,13 +317,15 @@ fn run_manual_purge(app: &tauri::AppHandle, state: &Arc<AppState>) -> ActionReco
             app,
             state,
             ActionRecord {
-                id: format!("manual-{timestamp}"),
+                id: action_id(timestamp),
                 timestamp_ms: timestamp,
                 origin: "manual".into(),
                 operation: OPERATION_PURGE_STANDBY.into(),
                 outcome: "telemetry_unavailable".into(),
                 native_request_succeeded: false,
+                native_lifecycle: "not_started".into(),
                 elevation_used: false,
+                late_completion_possible: false,
                 nt_status_hex: None,
                 before: Some(before),
                 after: None,
@@ -310,12 +351,16 @@ fn run_manual_purge(app: &tauri::AppHandle, state: &Arc<AppState>) -> ActionReco
             .zip(after.standby_bytes)
             .map(|(before, after)| (before - after).max(0.0))
     });
-    let outcome = action::classify_outcome(native.request_succeeded, native.nt_status, reduction);
+    let outcome = action::classify_outcome(&native, reduction);
     let reason = match (native.request_succeeded, reduction) {
         (true, Some(bytes)) if bytes >= 1024.0 * 1024.0 => format!(
             "{} Measured standby reduction after settling: {:.2} MiB.",
             native.detail,
             bytes / 1024.0 / 1024.0
+        ),
+        (true, None) => format!(
+            "{} Post-action standby measurement is unavailable; reduction cannot be determined.",
+            native.detail
         ),
         (true, _) => format!(
             "{} No material standby reduction was observed after the settling interval.",
@@ -328,14 +373,19 @@ fn run_manual_purge(app: &tauri::AppHandle, state: &Arc<AppState>) -> ActionReco
         app,
         state,
         ActionRecord {
-            id: format!("manual-{timestamp}"),
+            id: action_id(timestamp),
             timestamp_ms: timestamp,
             origin: "manual".into(),
             operation: OPERATION_PURGE_STANDBY.into(),
             outcome: outcome.into(),
             native_request_succeeded: native.request_succeeded,
-            elevation_used: native.elevated,
-            nt_status_hex: Some(format!("0x{:08X}", native.nt_status)),
+            native_lifecycle: serde_json::to_value(&native.lifecycle)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_else(|| "unknown".into()),
+            elevation_used: native.elevation_used,
+            late_completion_possible: native.late_completion_possible,
+            nt_status_hex: native.nt_status.map(|status| format!("0x{status:08X}")),
             before: Some(before),
             after,
             observed_reduction_bytes: reduction,
@@ -368,6 +418,11 @@ fn record_action(
             history.pop_front();
         }
         history.push_back(record.clone());
+        // Hold the history lock through replacement so simultaneous skipped and
+        // completed actions cannot race or persist an older snapshot last.
+        if let Err(error) = persist_action_history(&state.action_history_path, &history) {
+            log::warn!("Could not persist action history: {error}");
+        }
     }
     if let Err(error) = app.emit(EVENT_ACTION, &record) {
         log::warn!("Could not emit action result: {error}");
@@ -382,11 +437,72 @@ fn record_action(
     record
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ActionHistoryFile {
+    schema_version: u32,
+    records: VecDeque<ActionRecord>,
+}
+
+fn load_action_history(path: &Path) -> VecDeque<ActionRecord> {
+    let Ok(raw) = fs::read_to_string(path) else {
+        return VecDeque::with_capacity(ACTION_HISTORY_LIMIT);
+    };
+    match serde_json::from_str::<ActionHistoryFile>(&raw) {
+        Ok(mut file) if file.schema_version == 1 => {
+            while file.records.len() > ACTION_HISTORY_LIMIT {
+                file.records.pop_front();
+            }
+            file.records
+        }
+        Ok(_) => {
+            log::warn!("Action history uses an unsupported schema and was preserved.");
+            VecDeque::with_capacity(ACTION_HISTORY_LIMIT)
+        }
+        Err(error) => {
+            log::warn!("Action history is invalid and was preserved: {error}");
+            VecDeque::with_capacity(ACTION_HISTORY_LIMIT)
+        }
+    }
+}
+
+fn persist_action_history(path: &Path, records: &VecDeque<ActionRecord>) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Action history path has no parent directory.".to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Could not create action history directory: {error}"))?;
+    let temporary = path.with_extension("json.new");
+    let payload = serde_json::to_vec_pretty(&ActionHistoryFile {
+        schema_version: 1,
+        records: records.clone(),
+    })
+    .map_err(|error| format!("Could not serialize action history: {error}"))?;
+    let mut file = File::create(&temporary)
+        .map_err(|error| format!("Could not create temporary action history: {error}"))?;
+    file.write_all(&payload)
+        .map_err(|error| format!("Could not write action history: {error}"))?;
+    file.sync_all()
+        .map_err(|error| format!("Could not flush action history: {error}"))?;
+    drop(file);
+    crate::settings::atomic_replace(&temporary, path)
+        .map_err(|error| format!("Could not replace action history: {error}"))
+}
+
 fn show_dashboard(app: &tauri::AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+        if let Some(state) = app.try_state::<Arc<AppState>>()
+            && let Some(frame) = state
+                .latest
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_ref()
+        {
+            let _ = app.emit(EVENT_FRAME, frame);
+        }
     }
 }
 
@@ -409,6 +525,8 @@ fn spawn_sampler(app: tauri::AppHandle, state: Arc<AppState>) {
         .spawn(move || {
             let mut collector = PlatformCollector::new();
             let mut guardian = GuardianEvaluator::new();
+            let mut cleaner = CleanerPolicy::default();
+            let mut last_cleaner_evaluation_ms = 0_u64;
             let mut sequence = 0_u64;
 
             loop {
@@ -438,10 +556,37 @@ fn spawn_sampler(app: tauri::AppHandle, state: Arc<AppState>) {
                     sequence = sequence.saturating_add(1);
                     let snapshot = collector.collect(sequence, interval_ms);
                     let decision = guardian.evaluate(&snapshot, settings.guardian_enabled);
-                    let frame = TelemetryFrame {
+                    let mut frame = TelemetryFrame {
                         snapshot,
                         guardian: decision,
+                        cleaner_decision: state.cleaner_decision.read()
+                            .unwrap_or_else(|error| error.into_inner()).clone(),
                     };
+                    let now_ms = frame.snapshot.timestamp_ms;
+                    if now_ms.saturating_sub(last_cleaner_evaluation_ms)
+                        >= settings.cleaner_poll_interval_ms
+                    {
+                        cleaner.restore_completed_purges(state.action_history.lock()
+                            .unwrap_or_else(|error| error.into_inner()).iter()
+                            .filter(|record| record.native_request_succeeded)
+                            .map(|record| record.timestamp_ms.saturating_add(record.duration_ms)));
+                        let cleaner_decision = cleaner.evaluate(
+                            &settings,
+                            CleanerInputs {
+                                now_ms,
+                                standby_bytes: frame.snapshot.standby_bytes.value,
+                                free_zero_bytes: frame.snapshot.free_zero_bytes.value,
+                                foreground_executable: None,
+                                authorization_ready: false,
+                            },
+                        );
+                        *state
+                            .cleaner_decision
+                            .write()
+                            .unwrap_or_else(|error| error.into_inner()) = cleaner_decision.clone();
+                        frame.cleaner_decision = cleaner_decision;
+                        last_cleaner_evaluation_ms = now_ms;
+                    }
                     if sequence == 1 || sequence.is_multiple_of(60) {
                         log::info!(
                             "Telemetry milestone: sequence={sequence}, collection={:?}, pressure={:?}, available_bytes={:?}, commit_percent={:?}, standby_bytes={:?}, page_reads_per_second={:?}",
@@ -457,8 +602,9 @@ fn spawn_sampler(app: tauri::AppHandle, state: Arc<AppState>) {
                         .latest
                         .write()
                         .unwrap_or_else(|error| error.into_inner()) = Some(frame.clone());
-                    if let Err(error) = app.emit(EVENT_FRAME, &frame) {
-                        log::warn!("Could not emit telemetry frame: {error}");
+                    if window_visible
+                        && let Err(error) = app.emit(EVENT_FRAME, &frame) {
+                            log::warn!("Could not emit telemetry frame: {error}");
                     }
                     update_tray_tooltip(
                         &app,
@@ -552,13 +698,15 @@ pub fn run() {
             purge_standby_memory
         ])
         .setup(|app| {
-            let settings_path = app.path().app_config_dir()?.join("settings.json");
+            let config_dir = app.path().app_config_dir()?;
+            let settings_path = config_dir.join("settings.json");
+            let action_history_path = config_dir.join("action-history.json");
             let store = SettingsStore::new(settings_path);
             let envelope = store.load();
             if let Some(warning) = &envelope.warning {
                 log::warn!("{warning}");
             }
-            let state = Arc::new(AppState::new(store, envelope));
+            let state = Arc::new(AppState::new(store, envelope, action_history_path));
             app.manage(state.clone());
             build_tray(app)?;
             spawn_sampler(app.handle().clone(), state);
@@ -587,4 +735,49 @@ pub fn run() {
     builder
         .run(tauri::generate_context!())
         .expect("error while running MemFlux");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn record(index: u64) -> ActionRecord {
+        ActionRecord {
+            id: format!("test-{index}"),
+            timestamp_ms: index,
+            origin: "manual".into(),
+            operation: OPERATION_PURGE_STANDBY.into(),
+            outcome: "native_failed".into(),
+            native_request_succeeded: false,
+            native_lifecycle: "native_completed".into(),
+            elevation_used: true,
+            late_completion_possible: false,
+            nt_status_hex: Some("0xC0000061".into()),
+            before: None,
+            after: None,
+            observed_reduction_bytes: None,
+            duration_ms: 1,
+            native_duration_ms: 1,
+            reason: "fixture".into(),
+        }
+    }
+
+    #[test]
+    fn action_history_round_trips_and_is_bounded_on_load() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("memflux-history-test-{nonce}"));
+        let path = directory.join("action-history.json");
+        let records = (0..105).map(record).collect::<VecDeque<_>>();
+        persist_action_history(&path, &records).expect("persist history");
+        let loaded = load_action_history(&path);
+        assert_eq!(loaded.len(), ACTION_HISTORY_LIMIT);
+        assert_eq!(loaded.front().map(|item| item.id.as_str()), Some("test-5"));
+        assert_eq!(loaded.back().map(|item| item.id.as_str()), Some("test-104"));
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_dir(directory);
+    }
 }

@@ -2,7 +2,7 @@
 
 ## Status
 
-Monitoring foundation and Milestone 1 manual cleaner are implemented. Automatic policy and persistent history are planned.
+Monitoring, manual cleaning, deterministic automatic policy evaluation, and persistent bounded action history are implemented. Unattended automatic authorization and native execution remain incomplete.
 
 ## Process model
 
@@ -29,7 +29,8 @@ Manual command → serialize → pre-snapshot → fixed UAC helper → NTSTATUS 
 - `src-tauri/src/telemetry`: cross-platform contract and Windows adapter. Optional counters fail independently.
 - `src-tauri/src/action.rs`: build capability, exact privilege enablement, native call, and fixed one-shot elevated helper.
 - `src-tauri/src/guardian.rs`: deterministic pressure classifier, hysteresis, explanations, and tests.
-- `src-tauri/src/settings.rs`: schema version 1, range validation, safe defaults, and atomic Windows replacement.
+- `src-tauri/src/settings.rs`: schema version 2, monitoring/cleaner validation, safe defaults, and atomic Windows replacement.
+- `src-tauri/src/cleaner.rs`: direct standby/Free & Zero threshold policy, cooldown, hourly limits, exclusion matching and authorization gating, separate from Guardian.
 - `src-tauri/src/app.rs`: lifecycle, commands, native state, sampler, tray, and single-instance policy.
 - `src/hooks/useMemFlux.ts`: typed event/command bridge with bounded 90-sample UI history.
 - `src/App.tsx`: Overview, Memory Explorer, Adaptive Guardian, and Settings vertical slice.
@@ -41,6 +42,10 @@ Manual command → serialize → pre-snapshot → fixed UAC helper → NTSTATUS 
 - A condition variable waits between samples; settings, pause, resume, and shutdown wake it. There is no busy-wait loop.
 - The cadence is selected from validated settings based on main-window visibility.
 - The latest complete frame is held in a read/write lock for initial UI hydration.
+- Hidden windows receive no recurring telemetry events. The native sampler continues and Open dashboard emits the cached frame.
+- Helper transport results are typed separately from native status. Timeout retains a process handle; a new purge is blocked until the previous helper is signaled. A launched helper with no observable handle blocks further launches for the process lifetime. No helper is forcibly terminated.
+- The pending-helper guard is process-local. Parent exit does not terminate an already launched one-shot helper; cross-restart reconciliation remains unimplemented.
+- History mutation and atomic persistence share the same lock to prevent concurrent writes or stale replacement.
 - Guardian state is reset while paused, preventing old consecutive samples from carrying across a pause.
 - Close hides to tray only when configured. Tray Exit sets shutdown and exits. Single-instance launch focuses the existing window.
 
@@ -55,5 +60,5 @@ Manual command → serialize → pre-snapshot → fixed UAC helper → NTSTATUS 
 
 Every metric contains an identifier, optional value, unit, source, timestamp, sampling interval, status, and optional detail. A missing or warming sensor is never represented as numeric zero.
 
-Historical persistence is intentionally absent in Phase 1. The frontend keeps at most 90 recent frames in memory; closing the process discards them.
+The frontend keeps at most 90 telemetry frames in memory. Action records persist across restarts in `action-history.json` at the fixed application config directory, bounded to 100 records. Post-action measurement absence is distinct from an observed reduction of zero.
 

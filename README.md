@@ -13,7 +13,8 @@ The current cleaner milestone is enabled only on the explicitly validated Window
 - One-shot UAC helper that accepts only the fixed standby-purge operation and enables only `SeProfileSingleProcessPrivilege`.
 - Explicit capability detection and a tested-build allowlist; unsupported builds keep monitoring but disable the action.
 - Serialized actions with real standby, free/zero, and available-memory snapshots before and after a 750 ms settling interval.
-- Raw `NTSTATUS`, request success, measured reduction, duration, elevation path, and bounded in-session history.
+- Typed helper lifecycle, optional raw `NTSTATUS`, request success, measured reduction, duration, elevation path, and bounded persistent history.
+- Helper timeout is never interpreted as native success; late completion remains explicitly possible and is reported.
 - Honest success-with-no-measurable-reduction reporting.
 
 ## Monitoring foundation
@@ -28,9 +29,15 @@ The current cleaner milestone is enabled only on the explicitly validated Window
 - System tray open, pause/resume, close-to-tray, explicit exit, and single instance.
 - Responsive Midnight CosmoTech™ Overview, Memory Explorer, Guardian, and Settings views.
 
+## P0 cleaner evolution
+
+- Automatic-cleaner settings are now versioned and persisted, remain off by default, and expose direct standby and Free & Zero thresholds, polling, cooldown, minimum interval, hourly limit, cleaner-only pause, and executable exclusions.
+- A deterministic policy evaluator enforces both threshold conditions and the configured safeguards independently of Guardian.
+- Unattended native execution is intentionally still disabled. A background threshold must not launch surprise UAC prompts; the next slice is an explicitly authorized, narrowly scoped session helper with authenticated local IPC.
+
 ## Not implemented yet
 
-- Opt-in automatic threshold cleaning, cooldown/frequency limits, and exclusions (Milestone 2).
+- Secure unattended automatic purge execution and foreground-process exclusion observation (policy and persistence are implemented; native automatic execution is not).
 - Low-priority-only standby purge, pending independent native validation.
 - Timer-resolution changes.
 - Game overlays, PresentMon, performance sessions, and performance-improvement claims.
@@ -54,7 +61,7 @@ Create a native debug executable without an installer:
 npm run tauri build -- --debug --no-bundle
 ```
 
-See [MEMFLUX_IMPLEMENTATION_PLAN.md](MEMFLUX_IMPLEMENTATION_PLAN.md) for live milestone status, measurable gates, current risks, and actual validation results.
+See [MEMFLUX_IMPLEMENTATION_PLAN.md](MEMFLUX_IMPLEMENTATION_PLAN.md) and [MEMFLUX_PERFORMANCE_EVOLUTION_V3_PLAN.md](MEMFLUX_PERFORMANCE_EVOLUTION_V3_PLAN.md) for live milestone status, measurable gates, current risks, and actual validation results.
 
 ## Safety and privacy
 
@@ -62,5 +69,5 @@ Monitoring runs as a standard user. Manual cleaning requests UAC only for a one-
 
 ## Project maturity
 
-Milestone 1 cleaner alpha. Native purging is runtime-verified only on Windows 11 Home Insider Preview build 26340; other builds remain action-disabled until tested. Clearing cache is not a memory-leak fix and is not evidence of higher FPS or lower latency.
+P0 hardening alpha. Manual native purging is runtime-verified only on Windows 11 Home Insider Preview build 26340; other builds remain action-disabled until tested. Automatic policy is implemented but unattended authorization/execution is incomplete. Clearing cache is not a memory-leak fix and is not evidence of higher FPS or lower latency.
 

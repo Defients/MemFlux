@@ -280,14 +280,14 @@ function CleanerPanel({ capability, actions, purging, onPurge }: { capability: A
   const lastAction = actions.at(-1) ?? null;
   const resultClass = lastAction?.nativeRequestSucceeded ? "is-success" : lastAction ? "is-failure" : "";
   const resultTitle = !lastAction
-    ? "No purge recorded this session"
+    ? "No purge recorded"
     : lastAction.nativeRequestSucceeded
       ? lastAction.observedReductionBytes !== null && lastAction.observedReductionBytes >= 1024 * 1024
         ? `${formatBytes(lastAction.observedReductionBytes)} standby reduction observed`
-        : "Windows accepted the request; no material reduction observed"
+        : lastAction.observedReductionBytes === null ? "Windows accepted the request; measurement unavailable" : "Windows accepted the request; no material reduction observed"
       : lastAction.outcome === "elevation_cancelled"
         ? "Administrator approval was cancelled"
-        : "Standby purge did not complete";
+        : lastAction.lateCompletionPossible ? "Helper result pending or unknown" : "Standby purge did not complete";
   return (
     <section className={`panel cleaner-panel ${purging ? "is-running" : ""}`} aria-live="polite">
       <div className="cleaner-copy">
@@ -296,7 +296,7 @@ function CleanerPanel({ capability, actions, purging, onPurge }: { capability: A
         <p>MemFlux captures real counters before and after the native request. Clearing cached data can cause later disk reads and does not guarantee better performance.</p>
         <div className={`cleaner-capability capability-${capability.status}`}>
           <span className="status-dot" />
-          <span><strong>{capability.status === "ready" ? "Native action ready" : capability.status === "requires_elevation" ? "Administrator approval required" : "Unsupported on this build"}</strong><small>{capability.explanation}</small></span>
+          <span><strong>{capability.status === "ready" ? "Native action ready" : capability.status === "requires_elevation" ? "Administrator approval required" : capability.status === "unverified" ? "Windows build awaiting validation" : "Native action unavailable"}</strong><small>{capability.explanation}</small></span>
         </div>
         <button className="purge-button" disabled={!capability.supported || purging} onClick={onPurge}>
           <Icon name="pulse" size={21} />
@@ -316,7 +316,7 @@ function CleanerPanel({ capability, actions, purging, onPurge }: { capability: A
           <p>{lastAction.reason}</p>
           <div className="result-meta"><code>{lastAction.ntStatusHex ?? "no native status"}</code><span>{lastAction.durationMs} ms total</span><span>{formatTimestamp(lastAction.timestampMs)}</span></div>
           {actions.length > 1 && <div className="action-history"><strong>Recent actions</strong>{actions.slice(-4).reverse().map((record) => <div key={record.id}><span>{formatTimestamp(record.timestampMs)}</span><code>{record.ntStatusHex ?? "—"}</code><span>{formatBytes(record.observedReductionBytes)}</span></div>)}</div>}
-        </> : <p>Manual actions are serialized and retained in a bounded in-memory history. Native acceptance and measured change are reported separately.</p>}
+        </> : <p>Manual actions are serialized and retained locally in a bounded history across restarts. Native acceptance and measured change are reported separately.</p>}
       </div>
     </section>
   );
@@ -335,6 +335,7 @@ function OverviewPage({ frame, history, capability, actions, purging, onPurge }:
         <MetricCard label="Physical load" metric={snapshot.physicalLoadPercent} formatter={(value) => formatPercent(value, 1)} context={`${formatBytes(snapshot.totalPhysicalBytes.value)} total physical memory`} accent="#d58fff" />
       </section>
       <CleanerPanel capability={capability} actions={actions} purging={purging} onPurge={onPurge} />
+      <div className="panel-note" role="status">Automatic policy: {(frame.cleanerDecision ?? "disabled").replaceAll("_", " ")}. Unattended purge authorization is not yet available.</div>
       <section className="overview-hero">
         <MemoryDial snapshot={snapshot} />
         <GuardianPanel decision={frame.guardian} updated={snapshot.timestampMs} />
@@ -418,6 +419,8 @@ function SettingsPage({ envelope, saving, onSave }: { envelope: SettingsEnvelope
       <PageTitle eyebrow="Settings" title="Quiet by default. Precise by choice." description="Tune monitoring behavior and presentation. Settings are validated by the native runtime and stored locally in a versioned file." side={<button className="button button-primary" disabled={!changed || saving} onClick={() => void submit()}>{saving ? "Saving…" : saved ? "Saved" : "Save changes"}</button>} />
       {envelope.warning && <div className="degraded-banner"><Icon name="info" /><span><strong>Safe defaults active</strong>{envelope.warning}</span></div>}
       <div className="settings-grid">
+        <section className="panel settings-section"><span className="eyebrow">Cleaner timing</span><h2>Evaluation limits</h2><label className="select-row"><span><strong>Policy polling interval</strong><small>Evaluation follows available monitoring samples</small></span><select value={draft.cleanerPollIntervalMs} onChange={(event) => update("cleanerPollIntervalMs", Number(event.target.value))}><option value={1000}>1 second</option><option value={5000}>5 seconds</option><option value={10000}>10 seconds</option><option value={30000}>30 seconds</option><option value={60000}>60 seconds</option></select></label><label className="select-row"><span><strong>Minimum intervention interval</strong><small>Cooldown also applies</small></span><select value={draft.cleanerMinimumIntervalMs} onChange={(event) => update("cleanerMinimumIntervalMs", Number(event.target.value))}><option value={60000}>1 minute</option><option value={300000}>5 minutes</option><option value={600000}>10 minutes</option></select></label></section>
+        <section className="panel settings-section cleaner-settings"><span className="eyebrow">Standby cleaner</span><h2>Automatic threshold policy</h2><Toggle checked={draft.automaticCleaningEnabled} onChange={(value) => update("automaticCleaningEnabled", value)} label="Enable automatic evaluation" description="Opt in to standby plus Free & Zero threshold evaluation. Background triggers never open surprise UAC prompts." /><Toggle checked={draft.cleanerPaused} onChange={(value) => update("cleanerPaused", value)} label="Pause automatic cleaner" description="Pause cleaner policy independently while telemetry continues." /><label className="select-row"><span><strong>Standby threshold</strong><small>Both threshold conditions must be true</small></span><select value={draft.standbyThresholdBytes} onChange={(event) => update("standbyThresholdBytes", Number(event.target.value))}><option value={536870912}>512 MiB</option><option value={1073741824}>1 GiB</option><option value={2147483648}>2 GiB</option><option value={4294967296}>4 GiB</option></select></label><label className="select-row"><span><strong>Free & Zero threshold</strong><small>Not available physical memory</small></span><select value={draft.freeZeroThresholdBytes} onChange={(event) => update("freeZeroThresholdBytes", Number(event.target.value))}><option value={536870912}>512 MiB</option><option value={1073741824}>1 GiB</option><option value={2147483648}>2 GiB</option><option value={4294967296}>4 GiB</option></select></label><label className="select-row"><span><strong>Cooldown</strong><small>Minimum time after a completed purge</small></span><select value={draft.cleanerCooldownMs} onChange={(event) => update("cleanerCooldownMs", Number(event.target.value))}><option value={300000}>5 minutes</option><option value={600000}>10 minutes</option><option value={1800000}>30 minutes</option><option value={3600000}>1 hour</option></select></label><label className="select-row"><span><strong>Maximum frequency</strong><small>Completed purges per rolling hour</small></span><select value={draft.maximumPurgesPerHour} onChange={(event) => update("maximumPurgesPerHour", Number(event.target.value))}><option value={1}>1 per hour</option><option value={2}>2 per hour</option><option value={4}>4 per hour</option></select></label><label className="select-row exclusions-row"><span><strong>Excluded foreground apps</strong><small>Comma-separated executable names</small></span><input value={draft.cleanerExcludedApplications.join(", ")} onChange={(event) => update("cleanerExcludedApplications", event.target.value.split(",").map((value) => value.trim()).filter(Boolean))} placeholder="obs64.exe, game.exe" /></label><p className="settings-caveat">Policy configuration and safeguards are active foundations. Unattended native execution remains disabled until the explicitly authorized session helper is complete; manual purge remains available.</p></section>
         <section className="panel settings-section"><span className="eyebrow">Guardian & lifecycle</span><h2>Background behavior</h2><Toggle checked={draft.guardianEnabled} onChange={(value) => update("guardianEnabled", value)} label="Adaptive Guardian" description="Interpret memory pressure separately from manual cleaning." /><Toggle checked={draft.closeToTray} onChange={(value) => update("closeToTray", value)} label="Close to system tray" description="Keep the collector running when the dashboard closes." /></section>
         <section className="panel settings-section"><span className="eyebrow">Sampling policy</span><h2>Monitoring cadence</h2><label className="select-row"><span><strong>Dashboard visible</strong><small>Faster feedback while you are looking</small></span><select value={draft.foregroundIntervalMs} onChange={(event) => update("foregroundIntervalMs", Number(event.target.value))}><option value={500}>0.5 seconds</option><option value={1000}>1 second</option><option value={2000}>2 seconds</option><option value={5000}>5 seconds</option></select></label><label className="select-row"><span><strong>Dashboard hidden</strong><small>Lower-overhead background cadence</small></span><select value={draft.backgroundIntervalMs} onChange={(event) => update("backgroundIntervalMs", Number(event.target.value))}><option value={2000}>2 seconds</option><option value={5000}>5 seconds</option><option value={10000}>10 seconds</option><option value={30000}>30 seconds</option></select></label></section>
         <section className="panel settings-section"><span className="eyebrow">Appearance</span><h2>Interface comfort</h2><Toggle checked={draft.reducedMotion} onChange={(value) => update("reducedMotion", value)} label="Reduced motion" description="Suppress non-essential transitions and ambient movement." /><Toggle checked={draft.compactDensity} onChange={(value) => update("compactDensity", value)} label="Compact density" description="Tighten cards and tables for information-dense windows." /></section>
@@ -448,7 +451,7 @@ export default function App() {
     if (page === "settings") return settingsEnvelope ? <SettingsPage envelope={settingsEnvelope} saving={saving} onSave={saveSettings} /> : <LoadingView />;
     if (!frame) return <LoadingView />;
     if (page === "explorer") return <ExplorerPage frame={frame} />;
-    const capability = runtime?.actionCapability ?? { status: "unsupported", supported: false, requiresElevation: false, osBuild: null, mechanism: "Unavailable", explanation: "Capability detection has not completed." } satisfies ActionCapability;
+    const capability = runtime?.actionCapability ?? { status: "unverified", compatibilityStatus: "unverified", supported: false, requiresElevation: false, privilegeState: "not_evaluated", mechanismAvailable: false, osBuild: null, mechanism: "Unavailable", explanation: "Capability detection has not completed." } satisfies ActionCapability;
     if (page === "guardian") return <GuardianPage frame={frame} paused={paused} onPause={() => void setPaused(!paused)} capability={capability} />;
     return <OverviewPage frame={frame} history={history} capability={capability} actions={actionHistory} purging={purging} onPurge={() => void purgeStandby()} />;
   }, [frame, page, history, settingsEnvelope, saving, saveSettings, paused, setPaused, runtime?.actionCapability, actionHistory, purging, purgeStandby]);

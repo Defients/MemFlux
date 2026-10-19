@@ -1,5 +1,39 @@
 # Changelog
 
+## Unreleased — Performance Evolution V3 P0 hardening
+
+### Corrected
+
+- Replaced overloaded helper/native integers with typed lifecycle outcomes.
+- `WAIT_TIMEOUT (0x00000102)` can no longer be reported as an accepted native purge.
+- Timeout and wait failures explicitly report possible late helper completion without claiming termination.
+- Raw `NTSTATUS` is present only when the in-process call returns or the helper completed and its exit code was retrieved.
+- Timed-out helper handles remain owned; duplicate requests are blocked until exit is observed. Late completion is logged without claiming measured freed bytes.
+- Concurrent history replacement and settings persistence are serialized; same-millisecond action IDs remain distinct.
+- Missing post-action counters have a measurement-unavailable outcome.
+
+### Added
+
+- V3 audit and phased implementation plan.
+- Compatibility states separating confirmed support, unverified builds, privilege state, and missing mechanism.
+- Versioned, opt-in automatic-cleaner settings for direct standby/Free & Zero thresholds, polling, cooldown, minimum interval, hourly rate, pause, and exclusions.
+- Deterministic cleaner policy with threshold, authorization, exclusion, cooldown, and rate-limit tests.
+- Bounded action-history persistence through an atomic local journal.
+- Settings interface for the automatic policy with an explicit warning that unattended execution is not yet enabled.
+
+### Verification
+
+- 21 Rust tests pass, including production helper-result conversion, timeout regression, exact exclusion matching, historical cooldown, settings validation, persistent history, Guardian, and live Windows telemetry.
+- Rust format and Clippy with warnings denied pass.
+- TypeScript/Vite production build and 2 frontend tests pass.
+- Optimized no-bundle Tauri release build passes; rebuilt standard-user helper returns `0xC0000061` (`STATUS_PRIVILEGE_NOT_HELD`). Successful elevated purge and native timeout paths were not rerun.
+
+### Incomplete
+
+- Secure elevated session-helper IPC and native automatic execution remain P0-C work. Background evaluation does not prompt for UAC or claim an automatic purge.
+- Foreground executable observation for exclusions, stable Windows 10/11 qualification, native timeout/UAC rejection tests, and P1 features remain unimplemented or unverified.
+- Hidden dashboard event emission is suspended; resource savings have not been measured.
+
 ## 0.2.0-alpha — 2026-10-18
 
 ### Added

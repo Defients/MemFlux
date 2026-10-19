@@ -3,7 +3,7 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-pub const SETTINGS_SCHEMA_VERSION: u32 = 1;
+pub const SETTINGS_SCHEMA_VERSION: u32 = 2;
 
 fn default_schema_version() -> u32 {
     SETTINGS_SCHEMA_VERSION
@@ -19,6 +19,30 @@ fn default_foreground_interval() -> u64 {
 
 fn default_background_interval() -> u64 {
     5_000
+}
+
+fn default_cleaner_poll_interval() -> u64 {
+    5_000
+}
+
+fn default_standby_threshold() -> u64 {
+    1_073_741_824
+}
+
+fn default_free_zero_threshold() -> u64 {
+    1_073_741_824
+}
+
+fn default_cleaner_cooldown() -> u64 {
+    600_000
+}
+
+fn default_cleaner_minimum_interval() -> u64 {
+    300_000
+}
+
+fn default_maximum_purges_per_hour() -> u32 {
+    2
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -38,6 +62,24 @@ pub struct AppSettings {
     pub reduced_motion: bool,
     #[serde(default)]
     pub compact_density: bool,
+    #[serde(default)]
+    pub automatic_cleaning_enabled: bool,
+    #[serde(default)]
+    pub cleaner_paused: bool,
+    #[serde(default = "default_cleaner_poll_interval")]
+    pub cleaner_poll_interval_ms: u64,
+    #[serde(default = "default_standby_threshold")]
+    pub standby_threshold_bytes: u64,
+    #[serde(default = "default_free_zero_threshold")]
+    pub free_zero_threshold_bytes: u64,
+    #[serde(default = "default_cleaner_cooldown")]
+    pub cleaner_cooldown_ms: u64,
+    #[serde(default = "default_cleaner_minimum_interval")]
+    pub cleaner_minimum_interval_ms: u64,
+    #[serde(default = "default_maximum_purges_per_hour")]
+    pub maximum_purges_per_hour: u32,
+    #[serde(default)]
+    pub cleaner_excluded_applications: Vec<String>,
 }
 
 impl Default for AppSettings {
@@ -50,6 +92,15 @@ impl Default for AppSettings {
             background_interval_ms: default_background_interval(),
             reduced_motion: false,
             compact_density: false,
+            automatic_cleaning_enabled: false,
+            cleaner_paused: false,
+            cleaner_poll_interval_ms: default_cleaner_poll_interval(),
+            standby_threshold_bytes: default_standby_threshold(),
+            free_zero_threshold_bytes: default_free_zero_threshold(),
+            cleaner_cooldown_ms: default_cleaner_cooldown(),
+            cleaner_minimum_interval_ms: default_cleaner_minimum_interval(),
+            maximum_purges_per_hour: default_maximum_purges_per_hour(),
+            cleaner_excluded_applications: Vec::new(),
         }
     }
 }
@@ -62,6 +113,26 @@ impl AppSettings {
         if self.background_interval_ms < self.foreground_interval_ms {
             self.background_interval_ms = self.foreground_interval_ms;
         }
+        self.cleaner_poll_interval_ms = self.cleaner_poll_interval_ms.clamp(1_000, 60_000);
+        self.standby_threshold_bytes = self
+            .standby_threshold_bytes
+            .clamp(64 * 1024 * 1024, 1024_u64.pow(4));
+        self.free_zero_threshold_bytes = self
+            .free_zero_threshold_bytes
+            .clamp(64 * 1024 * 1024, 1024_u64.pow(4));
+        self.cleaner_cooldown_ms = self.cleaner_cooldown_ms.clamp(60_000, 86_400_000);
+        self.cleaner_minimum_interval_ms = self
+            .cleaner_minimum_interval_ms
+            .clamp(60_000, self.cleaner_cooldown_ms);
+        self.maximum_purges_per_hour = self.maximum_purges_per_hour.clamp(1, 12);
+        self.cleaner_excluded_applications = self
+            .cleaner_excluded_applications
+            .into_iter()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty() && value.len() <= 260)
+            .collect();
+        self.cleaner_excluded_applications.sort();
+        self.cleaner_excluded_applications.dedup();
         self
     }
 }
@@ -166,7 +237,7 @@ impl SettingsStore {
 }
 
 #[cfg(target_os = "windows")]
-fn atomic_replace(source: &Path, destination: &Path) -> windows::core::Result<()> {
+pub(crate) fn atomic_replace(source: &Path, destination: &Path) -> windows::core::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Storage::FileSystem::{
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
@@ -189,7 +260,7 @@ fn atomic_replace(source: &Path, destination: &Path) -> windows::core::Result<()
 }
 
 #[cfg(not(target_os = "windows"))]
-fn atomic_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
+pub(crate) fn atomic_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
     fs::rename(source, destination)
 }
 
@@ -218,6 +289,31 @@ mod tests {
         .validated();
         assert_eq!(settings.foreground_interval_ms, 500);
         assert_eq!(settings.background_interval_ms, 1_000);
+        assert_eq!(settings.cleaner_poll_interval_ms, 5_000);
+        assert!(!settings.automatic_cleaning_enabled);
+    }
+
+    #[test]
+    fn cleaner_settings_are_conservative_and_normalized() {
+        let settings = AppSettings {
+            automatic_cleaning_enabled: true,
+            cleaner_poll_interval_ms: 1,
+            cleaner_cooldown_ms: 1,
+            cleaner_minimum_interval_ms: 999_999_999,
+            maximum_purges_per_hour: 99,
+            cleaner_excluded_applications: vec![
+                " OBS64.EXE ".into(),
+                "obs64.exe".into(),
+                String::new(),
+            ],
+            ..Default::default()
+        }
+        .validated();
+        assert_eq!(settings.cleaner_poll_interval_ms, 1_000);
+        assert_eq!(settings.cleaner_cooldown_ms, 60_000);
+        assert_eq!(settings.cleaner_minimum_interval_ms, 60_000);
+        assert_eq!(settings.maximum_purges_per_hour, 12);
+        assert_eq!(settings.cleaner_excluded_applications, ["obs64.exe"]);
     }
 
     #[test]

@@ -51,6 +51,7 @@ export interface GuardianDecision {
 export interface TelemetryFrame {
   snapshot: MemorySnapshot;
   guardian: GuardianDecision;
+  cleanerDecision: string;
 }
 
 export interface AppSettings {
@@ -61,6 +62,15 @@ export interface AppSettings {
   backgroundIntervalMs: number;
   reducedMotion: boolean;
   compactDensity: boolean;
+  automaticCleaningEnabled: boolean;
+  cleanerPaused: boolean;
+  cleanerPollIntervalMs: number;
+  standbyThresholdBytes: number;
+  freeZeroThresholdBytes: number;
+  cleanerCooldownMs: number;
+  cleanerMinimumIntervalMs: number;
+  maximumPurgesPerHour: number;
+  cleanerExcludedApplications: string[];
 }
 
 export interface SettingsEnvelope {
@@ -72,13 +82,18 @@ export interface SettingsEnvelope {
 export interface RuntimeStatus {
   paused: boolean;
   cleanerPaused: boolean;
+  cleanerDecision: string;
+  automaticExecutionReady: boolean;
   actionCapability: ActionCapability;
 }
 
 export interface ActionCapability {
-  status: "ready" | "requires_elevation" | "unsupported";
+  status: "ready" | "requires_elevation" | "confirmed_unsupported" | "unverified" | "mechanism_unavailable";
+  compatibilityStatus: "confirmed_supported" | "confirmed_unsupported" | "unverified" | "mechanism_unavailable";
   supported: boolean;
   requiresElevation: boolean;
+  privilegeState: string;
+  mechanismAvailable: boolean;
   osBuild: number | null;
   mechanism: string;
   explanation: string;
@@ -97,7 +112,9 @@ export interface ActionRecord {
   operation: "purge_standby_list";
   outcome: string;
   nativeRequestSucceeded: boolean;
+  nativeLifecycle: string;
   elevationUsed: boolean;
+  lateCompletionPossible: boolean;
   ntStatusHex: string | null;
   before: ActionMeasurement | null;
   after: ActionMeasurement | null;

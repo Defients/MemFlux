@@ -16,8 +16,10 @@ npm run tauri build -- --debug --no-bundle
 - Byte, percentage, and rate formatting preserves unavailable states.
 - Percentage arithmetic bounds results and rejects a zero denominator.
 - Guardian healthy outcome, three-sample critical hysteresis, hysteresis reset, and missing-core suspension.
-- Settings interval constraints, persisted round trip, invalid-file fallback, and preservation of malformed data.
-- Exact native constants, fixed helper argument, and tested-build capability gating.
+- Settings interval/cleaner constraints, persisted round trip, invalid-file fallback, and preservation of malformed data.
+- Exact native constants, fixed helper argument, tested-build capability gating, and a regression proving helper timeout cannot become native success.
+- Automatic policy dual-threshold triggering, authorization gating, exclusions, minimum interval, cooldown, and rolling-hour rate limiting.
+- Bounded action-history persistence and restart loading.
 
 ## Native smoke checklist
 
@@ -43,6 +45,7 @@ npm run tauri build -- --debug --no-bundle
 - Retained sample after 750 ms: standby 233,820,160 → 25,538,560 bytes; Free & Zero 10,254,319,616 → 10,510,528,512 bytes.
 - The first successful run caused a PowerShell reporting overflow after the action; it is acknowledged but not used as precise numerical evidence.
 - UAC rejection, UI-driven concurrency, background/tray action, and shutdown during action remain unverified.
+- Helper timeout and late completion remain deterministic-test-only; no native timeout was intentionally induced.
 
 ## Required compatibility work
 
@@ -55,4 +58,10 @@ npm run tauri build -- --debug --no-bundle
 - 30-minute Phase 1 soak, followed by 8+ hour beta soak with handle/working-set tracking.
 
 Mock fixtures prove policy and UI behavior only. They are never evidence that a Windows action works or improves performance.
+
+## V3 P0 continuation
+
+21 Rust tests and 2 frontend tests pass; strict TypeScript production build, Rust format and all-target Clippy with warnings denied pass. Production result conversion now has a regression test for wait timeout, wait failure, missing exit code, cancellation and native privilege failure. Tests also cover exact exclusion matching, unknown foreground identity, cleaner pause/default disable, and cooldown restored from persisted manual actions.
+
+The current sandbox denies CIM queries; read-only registry inspection confirms build 26340.9750. Successful native purge evidence above belongs to the earlier baseline. This continuation has not repeated elevation or disruptive purge tests. P0 is still partial because session-helper authorization and automatic native execution are incomplete.
 

@@ -12,8 +12,11 @@ const SUPPORTED_BUILDS: &[u32] = &[26340];
 #[serde(rename_all = "camelCase")]
 pub struct ActionCapability {
     pub status: String,
+    pub compatibility_status: String,
     pub supported: bool,
     pub requires_elevation: bool,
+    pub privilege_state: String,
+    pub mechanism_available: bool,
     pub os_build: Option<u32>,
     pub mechanism: String,
     pub explanation: String,
@@ -21,11 +24,27 @@ pub struct ActionCapability {
 
 #[derive(Clone, Debug)]
 pub struct NativeActionResult {
-    pub nt_status: u32,
+    pub lifecycle: NativeActionLifecycle,
+    pub nt_status: Option<u32>,
     pub request_succeeded: bool,
-    pub elevated: bool,
+    pub elevation_used: bool,
+    pub late_completion_possible: bool,
     pub duration_ms: u64,
     pub detail: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeActionLifecycle {
+    NativeCompleted,
+    ElevationCancelled,
+    HelperLaunchFailed,
+    HelperHandleUnavailable,
+    HelperWaitTimedOut,
+    HelperStillRunning,
+    HelperWaitFailed,
+    HelperExitCodeFailed,
+    Unsupported,
 }
 
 pub fn capability() -> ActionCapability {
@@ -36,17 +55,19 @@ pub fn execute_standby_purge() -> NativeActionResult {
     platform::execute_standby_purge()
 }
 
-pub fn classify_outcome(
-    request_succeeded: bool,
-    nt_status: u32,
-    reduction_bytes: Option<f64>,
-) -> &'static str {
-    if !request_succeeded {
-        if nt_status == 0xC000_0120 {
-            "elevation_cancelled"
-        } else {
-            "native_failed"
-        }
+pub fn classify_outcome(native: &NativeActionResult, reduction_bytes: Option<f64>) -> &'static str {
+    if native.lifecycle == NativeActionLifecycle::ElevationCancelled {
+        "elevation_cancelled"
+    } else if native.lifecycle == NativeActionLifecycle::HelperWaitTimedOut {
+        "helper_wait_timed_out"
+    } else if native.lifecycle == NativeActionLifecycle::HelperStillRunning {
+        "skipped_helper_pending"
+    } else if native.lifecycle != NativeActionLifecycle::NativeCompleted {
+        "helper_failed"
+    } else if !native.request_succeeded {
+        "native_failed"
+    } else if reduction_bytes.is_none() {
+        "request_succeeded_measurement_unavailable"
     } else if reduction_bytes.is_some_and(|bytes| bytes >= 1024.0 * 1024.0) {
         "request_succeeded_reduction_observed"
     } else {
@@ -68,6 +89,8 @@ mod platform {
     use super::*;
     use std::mem::{size_of, zeroed};
     use std::os::windows::ffi::OsStrExt;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use windows::Win32::Foundation::{
         CloseHandle, ERROR_CANCELLED, ERROR_NOT_ALL_ASSIGNED, GetLastError, HANDLE, LUID,
         WAIT_OBJECT_0, WAIT_TIMEOUT,
@@ -108,6 +131,12 @@ mod platform {
 
     struct OwnedHandle(HANDLE);
 
+    // Process handles can be waited on and closed from different threads. Access
+    // is serialized by PENDING_HELPER; ownership is never duplicated.
+    unsafe impl Send for OwnedHandle {}
+    static PENDING_HELPER: Mutex<Option<OwnedHandle>> = Mutex::new(None);
+    static UNOBSERVABLE_HELPER: AtomicBool = AtomicBool::new(false);
+
     impl Drop for OwnedHandle {
         fn drop(&mut self) {
             if !self.0.is_invalid() {
@@ -125,12 +154,14 @@ mod platform {
         if !export_present {
             return unsupported(
                 build,
+                "mechanism_unavailable",
                 "ntdll.dll does not export NtSetSystemInformation on this configuration.",
             );
         }
         if !build_supported {
             return unsupported(
                 build,
+                "unverified",
                 "This Windows build is outside MemFlux's validated standby-purge allowlist. Monitoring remains available.",
             );
         }
@@ -142,8 +173,16 @@ mod platform {
                 "requires_elevation"
             }
             .into(),
+            compatibility_status: "confirmed_supported".into(),
             supported: true,
             requires_elevation: !elevated,
+            privilege_state: if elevated {
+                "elevated_not_yet_enabled"
+            } else {
+                "elevation_required"
+            }
+            .into(),
+            mechanism_available: true,
             os_build: build,
             mechanism:
                 "NtSetSystemInformation(SystemMemoryListInformation=80, MemoryPurgeStandbyList=4)"
@@ -156,11 +195,18 @@ mod platform {
         }
     }
 
-    fn unsupported(build: Option<u32>, explanation: &str) -> ActionCapability {
+    fn unsupported(
+        build: Option<u32>,
+        compatibility_status: &str,
+        explanation: &str,
+    ) -> ActionCapability {
         ActionCapability {
-            status: "unsupported".into(),
+            status: compatibility_status.into(),
+            compatibility_status: compatibility_status.into(),
             supported: false,
             requires_elevation: false,
+            privilege_state: "not_evaluated".into(),
+            mechanism_available: compatibility_status != "mechanism_unavailable",
             os_build: build,
             mechanism: "NtSetSystemInformation/SystemMemoryListInformation".into(),
             explanation: explanation.into(),
@@ -171,9 +217,11 @@ mod platform {
         let capability = capability();
         if !capability.supported {
             return NativeActionResult {
-                nt_status: 0,
+                lifecycle: NativeActionLifecycle::Unsupported,
+                nt_status: None,
                 request_succeeded: false,
-                elevated: false,
+                elevation_used: false,
+                late_completion_possible: false,
                 duration_ms: 0,
                 detail: capability.explanation,
             };
@@ -181,20 +229,13 @@ mod platform {
 
         let started = Instant::now();
         let already_elevated = is_elevated().unwrap_or(false);
-        let (status, detail) = if already_elevated {
+        let execution = if already_elevated {
             let status = perform_native_purge();
-            (status, status_detail(status))
+            HelperExecution::NativeCompleted(status)
         } else {
             launch_elevated_helper()
         };
-
-        NativeActionResult {
-            nt_status: status,
-            request_succeeded: nt_success(status),
-            elevated: already_elevated || nt_success(status),
-            duration_ms: started.elapsed().as_millis() as u64,
-            detail,
-        }
+        execution.into_result(started, already_elevated)
     }
 
     pub fn run_helper() -> u32 {
@@ -259,14 +300,120 @@ mod platform {
         Ok(())
     }
 
-    fn launch_elevated_helper() -> (u32, String) {
+    enum HelperExecution {
+        NativeCompleted(u32),
+        ElevationCancelled,
+        LaunchFailed(String),
+        HandleUnavailable,
+        WaitTimedOut,
+        StillRunning,
+        WaitFailed(u32),
+        ExitCodeFailed(String),
+    }
+
+    impl HelperExecution {
+        fn into_result(self, started: Instant, already_elevated: bool) -> NativeActionResult {
+            let (lifecycle, nt_status, request_succeeded, late_completion_possible, detail) =
+                match self {
+                    Self::NativeCompleted(status) => (
+                        NativeActionLifecycle::NativeCompleted,
+                        Some(status),
+                        nt_success(status),
+                        false,
+                        status_detail(status),
+                    ),
+                    Self::ElevationCancelled => (
+                        NativeActionLifecycle::ElevationCancelled,
+                        None,
+                        false,
+                        false,
+                        "Administrator approval was declined or cancelled.".into(),
+                    ),
+                    Self::LaunchFailed(error) => (
+                        NativeActionLifecycle::HelperLaunchFailed,
+                        None,
+                        false,
+                        false,
+                        error,
+                    ),
+                    Self::HandleUnavailable => (
+                        NativeActionLifecycle::HelperHandleUnavailable,
+                        None,
+                        false,
+                        true,
+                        "Windows launched the helper but did not return a process handle; completion cannot be observed.".into(),
+                    ),
+                    Self::WaitTimedOut => (
+                        NativeActionLifecycle::HelperWaitTimedOut,
+                        None,
+                        false,
+                        true,
+                        "The elevated helper did not finish within 60 seconds. It was not terminated and may still complete; no native result is available.".into(),
+                    ),
+                    Self::StillRunning => (
+                        NativeActionLifecycle::HelperStillRunning,
+                        None,
+                        false,
+                        true,
+                        "A previous helper has not been observed to exit. A duplicate request was blocked; the previous helper may still complete.".into(),
+                    ),
+                    Self::WaitFailed(code) => (
+                        NativeActionLifecycle::HelperWaitFailed,
+                        None,
+                        false,
+                        true,
+                        format!("Waiting for the elevated helper failed with Win32 wait result 0x{code:08X}; the helper may still complete."),
+                    ),
+                    Self::ExitCodeFailed(error) => (
+                        NativeActionLifecycle::HelperExitCodeFailed,
+                        None,
+                        false,
+                        false,
+                        error,
+                    ),
+                };
+            NativeActionResult {
+                lifecycle: lifecycle.clone(),
+                nt_status,
+                request_succeeded,
+                elevation_used: !already_elevated
+                    && !matches!(
+                        lifecycle,
+                        NativeActionLifecycle::ElevationCancelled
+                            | NativeActionLifecycle::HelperLaunchFailed
+                    ),
+                late_completion_possible,
+                duration_ms: started.elapsed().as_millis() as u64,
+                detail,
+            }
+        }
+    }
+
+    fn launch_elevated_helper() -> HelperExecution {
+        if UNOBSERVABLE_HELPER.load(Ordering::Acquire) {
+            return HelperExecution::StillRunning;
+        }
+        let mut pending = PENDING_HELPER
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(process) = pending.as_ref() {
+            if unsafe { WaitForSingleObject(process.0, 0) } != WAIT_OBJECT_0 {
+                return HelperExecution::StillRunning;
+            }
+            let mut status = 0;
+            if unsafe { GetExitCodeProcess(process.0, &mut status) }.is_ok() {
+                log::info!(
+                    "Previous helper completed late: native status 0x{status:08X}; no attributable post-action measurement is available."
+                );
+            }
+            *pending = None;
+        }
         let executable = match std::env::current_exe() {
             Ok(path) => path,
             Err(error) => {
-                return (
-                    0xC000_0001,
-                    format!("Could not resolve the MemFlux executable: {error}"),
-                );
+                return HelperExecution::LaunchFailed(format!(
+                    "Could not resolve the MemFlux executable: {error}"
+                ));
             }
         };
         let file: Vec<u16> = executable
@@ -288,45 +435,34 @@ mod platform {
         if let Err(error) = unsafe { ShellExecuteExW(&mut info) } {
             let cancelled = error.code().0 as u32 == (0x8007_0000 | ERROR_CANCELLED.0);
             return if cancelled {
-                (
-                    0xC000_0120,
-                    "Administrator approval was declined or cancelled.".into(),
-                )
+                HelperExecution::ElevationCancelled
             } else {
-                (
-                    0xC000_0001,
-                    format!("Could not launch the elevated helper: {error}"),
-                )
+                HelperExecution::LaunchFailed(format!(
+                    "Could not launch the elevated helper: {error}"
+                ))
             };
         }
         let process = OwnedHandle(info.hProcess);
         if process.0.is_invalid() {
-            return (
-                0xC000_0001,
-                "Windows did not return an elevated helper process handle.".into(),
-            );
+            UNOBSERVABLE_HELPER.store(true, Ordering::Release);
+            return HelperExecution::HandleUnavailable;
         }
         let wait = unsafe { WaitForSingleObject(process.0, 60_000) };
         if wait == WAIT_TIMEOUT {
-            return (
-                0x0000_0102,
-                "The elevated helper did not finish within 60 seconds.".into(),
-            );
+            *pending = Some(process);
+            return HelperExecution::WaitTimedOut;
         }
         if wait != WAIT_OBJECT_0 {
-            return (
-                0xC000_0001,
-                format!("Waiting for the elevated helper failed (0x{:08X}).", wait.0),
-            );
+            *pending = Some(process);
+            return HelperExecution::WaitFailed(wait.0);
         }
         let mut exit_code = 0_u32;
         if let Err(error) = unsafe { GetExitCodeProcess(process.0, &mut exit_code) } {
-            return (
-                0xC000_0001,
-                format!("Could not read the helper result: {error}"),
-            );
+            return HelperExecution::ExitCodeFailed(format!(
+                "Could not read the completed helper result: {error}"
+            ));
         }
-        (exit_code, status_detail(exit_code))
+        HelperExecution::NativeCompleted(exit_code)
     }
 
     fn is_elevated() -> Result<bool, String> {
@@ -386,6 +522,30 @@ mod platform {
             _ => format!("Windows rejected the native request with NTSTATUS 0x{status:08X}."),
         }
     }
+
+    #[cfg(test)]
+    mod lifecycle_tests {
+        use super::*;
+
+        #[test]
+        fn transport_conversion_does_not_invent_native_status() {
+            for execution in [
+                HelperExecution::WaitTimedOut,
+                HelperExecution::StillRunning,
+                HelperExecution::WaitFailed(u32::MAX),
+                HelperExecution::ElevationCancelled,
+                HelperExecution::ExitCodeFailed("fixture".into()),
+            ] {
+                let result = execution.into_result(Instant::now(), false);
+                assert!(!result.request_succeeded);
+                assert_eq!(result.nt_status, None);
+            }
+            let result = HelperExecution::NativeCompleted(STATUS_PRIVILEGE_NOT_HELD)
+                .into_result(Instant::now(), false);
+            assert_eq!(result.nt_status, Some(STATUS_PRIVILEGE_NOT_HELD));
+            assert!(!result.request_succeeded);
+        }
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -394,9 +554,12 @@ mod platform {
 
     pub fn capability() -> ActionCapability {
         ActionCapability {
-            status: "unsupported".into(),
+            status: "confirmed_unsupported".into(),
+            compatibility_status: "confirmed_unsupported".into(),
             supported: false,
             requires_elevation: false,
+            privilege_state: "not_available".into(),
+            mechanism_available: false,
             os_build: None,
             mechanism: "Windows native memory-list API".into(),
             explanation: "Standby-list purging is supported only on validated Windows builds."
@@ -406,9 +569,11 @@ mod platform {
 
     pub fn execute_standby_purge() -> NativeActionResult {
         NativeActionResult {
-            nt_status: 0,
+            lifecycle: NativeActionLifecycle::Unsupported,
+            nt_status: None,
             request_succeeded: false,
-            elevated: false,
+            elevation_used: false,
+            late_completion_possible: false,
             duration_ms: 0,
             detail: capability().explanation,
         }
@@ -440,21 +605,42 @@ mod tests {
 
     #[test]
     fn native_success_and_measured_change_are_classified_separately() {
+        let completed = |status| NativeActionResult {
+            lifecycle: NativeActionLifecycle::NativeCompleted,
+            nt_status: Some(status),
+            request_succeeded: (status as i32) >= 0,
+            elevation_used: true,
+            late_completion_possible: false,
+            duration_ms: 1,
+            detail: String::new(),
+        };
         assert_eq!(
-            classify_outcome(true, 0, Some(32.0 * 1024.0 * 1024.0)),
+            classify_outcome(&completed(0), Some(32.0 * 1024.0 * 1024.0)),
             "request_succeeded_reduction_observed"
         );
         assert_eq!(
-            classify_outcome(true, 0, Some(0.0)),
+            classify_outcome(&completed(0), Some(0.0)),
             "request_succeeded_no_measurable_reduction"
         );
         assert_eq!(
-            classify_outcome(false, STATUS_PRIVILEGE_NOT_HELD, None),
+            classify_outcome(&completed(STATUS_PRIVILEGE_NOT_HELD), None),
             "native_failed"
         );
-        assert_eq!(
-            classify_outcome(false, 0xC000_0120, None),
-            "elevation_cancelled"
-        );
+    }
+
+    #[test]
+    fn wait_timeout_can_never_be_native_success() {
+        let timeout = NativeActionResult {
+            lifecycle: NativeActionLifecycle::HelperWaitTimedOut,
+            nt_status: None,
+            request_succeeded: false,
+            elevation_used: true,
+            late_completion_possible: true,
+            duration_ms: 60_000,
+            detail: String::new(),
+        };
+        assert_eq!(classify_outcome(&timeout, None), "helper_wait_timed_out");
+        assert!(timeout.nt_status.is_none());
+        assert!(!timeout.request_succeeded);
     }
 }
