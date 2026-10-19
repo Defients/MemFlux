@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026-10-19 — Interface refinement pass
+
+Visual polish only — no behavior, copy, layout structure, or information-architecture changes. `tsc -b` + `vite build` clean; all 15 frontend tests pass.
+
+- **Readability:** raised the smallest text sizes across the dashboard (≈7.5–10.5 px → ≈8–11.5 px) and tightened line-height rhythm so dense telemetry stays legible; brightened `--text-muted`/`--text-secondary` for small-text contrast; added a global monospace `code` face and `::selection` styling.
+- **Depth & affordance:** inset top highlight on panels, cards, and elevated surfaces; metric-card and table-row hover states; full-bleed hover on settings rows; custom select chevrons (replacing native arrows); input focus rings; success/failure tinting on the cleaner result panel; WebKit scrollbar theming.
+- **Motion:** animated memory-dial sweep via registered `@property --dial-value`, animated composition-bar/HUD track widths, page fade-in on navigation, disclosure chevrons on Atlas domains and the sidebar HUD — all suppressed under reduced-motion settings.
+- **Harmonization:** Bottleneck Atlas panels now use the shared design tokens instead of hard-coded colors; consistent 22 px panel padding; brand/nav divider; session-strip accent edge; HUD track colors aligned to the accent palette.
+- **Fixes:** `.cleaner-panel` referenced the undefined `--surface-panel` variable (its background declaration was invalid and the gradient never rendered) — replaced with the intended tinted surface; the fixed-width sensor-table columns no longer crush the fifth column of the Stutter Detective and Performance Proof tables (width rules now scope to four-column tables).
+- **Dev tooling:** added `preview.html` + `src/preview.tsx`, a dev-only mocked-IPC surface for browser-based visual QA (`npm run dev` → `/preview.html`); it is not referenced by `index.html` and is excluded from production bundles.
+
+## 2026-10-19 — Dashboard layout & settings save polish
+
+Local validation: 15 frontend tests passed (4 new Settings save-floater regressions); strict TypeScript build passed. Rust suite unchanged (69 tests); cargo fmt and strict all-target Clippy pass.
+
+- Overview is now a telemetry-only command center: the standby cleaner panel, session authorization, and Adaptive Guardian panel are consolidated under Memory Control.
+- Settings moved the save action into a floating bar with Discard, shown only while a draft diverges or a save is in flight. Fixed an unhandled rejection on save failure, an untracked confirmation timer, and a stale "Saved" label surviving into a new edit.
+- Keyboard focus on settings toggles now draws the ring on the visible switch instead of the 1px hidden checkbox input.
+- Fire-and-forget action buttons (purge, session authorize/revoke, PowerShift, Rewind restores, GameFocus, FPS capture, onboarding dismiss) now consume their rejections; hook-recorded failures keep surfacing through the shared error banner. GameFocus profile edits keep form state when a save fails.
+- Onboarding eyebrow updated to the 1.0 Release Candidate product name.
+
 ## 1.0.0 — Release Candidate · 2026-10-19
 
 - Version synchronized to `1.0.0` across `package.json`, `package-lock.json`, `tauri.conf.json`, `Cargo.toml`, `Cargo.lock`, and the sidebar footer label (`Beta Candidate` → `Release Candidate`).

@@ -39,7 +39,7 @@ The earlier monitoring-first phase interpretation is superseded. MemFlux is not 
 - [x] Kept the main monitor unelevated; added a fixed-argument, one-shot UAC helper in the same executable.
 - [x] Added an exact build allowlist. Build 26340 is enabled; other builds return Unsupported while monitoring continues.
 - [x] Added serialized manual action execution, pre/post snapshots, 750 ms settling time, raw `NTSTATUS`, measured reduction, and bounded 100-event session history.
-- [x] Added a prominent Overview cleaner control with distinct running, unsupported, failure, native-success/no-change, and measured-reduction results.
+- [x] Added a prominent cleaner control with distinct running, unsupported, failure, native-success/no-change, and measured-reduction results (located on the Overview page at the time; since consolidated under Memory Control).
 - [x] Runtime-tested the helper on Windows 11 Home Insider Preview build 26340. Unelevated direct execution returned `0xC0000061`; elevated execution returned `0x00000000`. A retained controlled sample measured standby 233,820,160 → 25,538,560 bytes and Free & Zero 10,254,319,616 → 10,510,528,512 bytes after 750 ms.
 - [ ] Direct UI-driven UAC acceptance/rejection, simultaneous UI requests, and native visual interaction remain unverified because this session cannot attach to native app windows.
 

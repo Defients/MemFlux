@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useMemFlux } from "./hooks/useMemFlux";
 import { native } from "./lib/native";
 import { PerformanceHud } from "./components/PerformanceHud";
@@ -64,7 +64,7 @@ const REWIND_TAG_CLASS: Record<string, string> = {
 };
 
 const NAVIGATION: Array<{ id: PageId; label: string; caption: string; icon: IconName }> = [
-  { id: "overview", label: "Overview", caption: "System & cleaner", icon: "overview" },
+  { id: "overview", label: "Overview", caption: "System telemetry", icon: "overview" },
   { id: "memory", label: "Memory Control", caption: "Cleaner & Guardian", icon: "shield" },
   { id: "performance", label: "Performance Control", caption: "GameFocus & PowerShift", icon: "pulse" },
   { id: "intelligence", label: "Bottleneck Atlas", caption: "Evidence & experiments", icon: "explorer" },
@@ -191,7 +191,7 @@ function OnboardingBanner({
     <section className="panel onboarding-panel" aria-label="First-run system capability guide">
       <div className="panel-heading">
         <div>
-          <span className="eyebrow">Welcome to MemFlux V4.1 · CosmoTech™</span>
+          <span className="eyebrow">Welcome to MemFlux 1.0 · CosmoTech™</span>
           <h2>System capability scan & control guide</h2>
         </div>
         <button className="button button-primary" onClick={onComplete}>
@@ -565,29 +565,15 @@ function OverviewPage({
   frame,
   history,
   capability,
-  runtime,
-  actions,
-  purging,
-  authorizingSession,
   showOnboarding,
   onDismissOnboarding,
-  onPurge,
-  onAuthorizeSession,
-  onRevokeSession,
   onNavigate
 }: {
   frame: TelemetryFrame;
   history: TelemetryHistoryFrame[];
   capability: ActionCapability;
-  runtime: RuntimeStatus | null;
-  actions: ActionRecord[];
-  purging: boolean;
-  authorizingSession: boolean;
   showOnboarding: boolean;
   onDismissOnboarding: () => void;
-  onPurge: () => void;
-  onAuthorizeSession: () => void;
-  onRevokeSession: () => void;
   onNavigate: (page: PageId) => void;
 }) {
   const { snapshot } = frame;
@@ -623,24 +609,6 @@ function OverviewPage({
         <MetricCard label="Available memory" metric={snapshot.availablePhysicalBytes} formatter={formatBytes} context="Includes reclaimable standby" accent="#78beff" />
         <MetricCard label="Physical load" metric={snapshot.physicalLoadPercent} formatter={(value) => formatPercent(value, 1)} context={`${formatBytes(snapshot.totalPhysicalBytes.value)} total physical memory`} accent="#d58fff" />
       </section>
-      <CleanerPanel
-        capability={capability}
-        cleanerStatus={frame.cleanerStatus ?? runtime?.cleanerStatus}
-        cleanerSession={runtime?.cleanerSession}
-        actions={actions}
-        purging={purging}
-        authorizingSession={authorizingSession}
-        onPurge={onPurge}
-        onAuthorizeSession={onAuthorizeSession}
-        onRevokeSession={onRevokeSession}
-      />
-      <div className="panel-note" role="status">
-        Automatic policy: {frame.cleanerStatus?.label ?? (frame.cleanerDecision ?? "disabled").replaceAll("_", " ")}.{" "}
-        {runtime?.cleanerSession?.authorized
-          ? "Authenticated elevated session helper is active."
-          : "Authorize a session helper to enable unattended threshold cleaning."}
-      </div>
-
       {gf && (
         <section className="panel overview-session-strip">
           <div>
@@ -665,7 +633,6 @@ function OverviewPage({
 
       <section className="overview-hero">
         <MemoryDial snapshot={snapshot} />
-        <GuardianPanel decision={frame.guardian} updated={snapshot.timestampMs} />
       </section>
       <div className="dashboard-grid">
         <MemoryComposition snapshot={snapshot} />
@@ -844,19 +811,27 @@ function PerformanceControlPage({
   const handleAddProfile = async () => {
     if (!newProfileName.trim() || !newProfileExe.trim()) return;
     const created = buildPresetProfile(newProfileName.trim(), newProfileExe.trim(), newProfilePreset);
-    await onSaveSettings({
-      ...settings,
-      gameProfiles: [...profiles, created]
-    });
+    try {
+      await onSaveSettings({
+        ...settings,
+        gameProfiles: [...profiles, created]
+      });
+    } catch {
+      return; // failures surface through the shared error banner
+    }
     setNewProfileName("");
     setNewProfileExe("");
   };
 
   const handleDeleteProfile = async (id: string) => {
-    await onSaveSettings({
-      ...settings,
-      gameProfiles: profiles.filter((p) => p.id !== id)
-    });
+    try {
+      await onSaveSettings({
+        ...settings,
+        gameProfiles: profiles.filter((p) => p.id !== id)
+      });
+    } catch {
+      // failures surface through the shared error banner
+    }
   };
 
   const handleConfirmCandidate = async (preset: GamePreset) => {
@@ -866,11 +841,15 @@ function PerformanceControlPage({
       gf.candidate.executableName,
       preset
     );
-    await onSaveSettings({
-      ...settings,
-      gameProfiles: [...profiles.filter((p) => p.executable !== profile.executable), profile]
-    });
-    await onActivateGameFocus(profile, gf.candidate.pid, gf.candidate.executablePath);
+    try {
+      await onSaveSettings({
+        ...settings,
+        gameProfiles: [...profiles.filter((p) => p.executable !== profile.executable), profile]
+      });
+      await onActivateGameFocus(profile, gf.candidate.pid, gf.candidate.executablePath);
+    } catch {
+      // failures surface through the shared error banner
+    }
   };
 
   return (
@@ -881,7 +860,7 @@ function PerformanceControlPage({
         description="Detect gaming sessions, protect streaming workloads, and apply verified reversible Windows power configurations backed by Optimization Rewind."
         side={
           isSessionActive ? (
-            <button className="button button-primary" onClick={() => void onDeactivateGameFocus()}>
+            <button className="button button-primary" onClick={() => void onDeactivateGameFocus().catch(() => undefined)}>
               Deactivate GameFocus and Restore
             </button>
           ) : undefined
@@ -977,19 +956,19 @@ function PerformanceControlPage({
 
           {isSessionActive && (
             <div className="session-auth-actions" style={{ marginTop: 14, display: "flex", gap: 10 }}>
-              <button className="button button-primary" onClick={() => void onDeactivateGameFocus()}>
+              <button className="button button-primary" onClick={() => void onDeactivateGameFocus().catch(() => undefined)}>
                 Deactivate GameFocus and Restore
               </button>
               {gf?.activePid && settings.fpsCapturePermitted && !frame.fpsCapture?.active && (
                 <button
                   className="button button-quiet"
-                  onClick={() => void onStartFpsCapture(gf.activePid!, gf.activeExecutableName ?? "game.exe")}
+                  onClick={() => void onStartFpsCapture(gf.activePid!, gf.activeExecutableName ?? "game.exe").catch(() => undefined)}
                 >
                   Start FPS Capture
                 </button>
               )}
               {frame.fpsCapture?.active && (
-                <button className="button button-quiet" onClick={() => void onStopFpsCapture()}>
+                <button className="button button-quiet" onClick={() => void onStopFpsCapture().catch(() => undefined)}>
                   Stop FPS Capture
                 </button>
               )}
@@ -1043,21 +1022,21 @@ function PerformanceControlPage({
             <button
               className="button button-quiet"
               disabled={!ps?.balancedSchemeAvailable}
-              onClick={() => void onApplyPowerShift("balanced")}
+              onClick={() => void onApplyPowerShift("balanced").catch(() => undefined)}
             >
               Apply Balanced Scheme
             </button>
             <button
               className="button button-primary"
               disabled={!ps?.performanceSchemeAvailable}
-              onClick={() => void onApplyPowerShift("performance")}
+              onClick={() => void onApplyPowerShift("performance").catch(() => undefined)}
             >
               Apply Performance Scheme
             </button>
             {ps?.memfluxOwnsActiveChange && ps.activeRewindEntry && (
               <button
                 className="button button-quiet"
-                onClick={() => void onRestoreRewindEntry(ps.activeRewindEntry!.actionId)}
+                onClick={() => void onRestoreRewindEntry(ps.activeRewindEntry!.actionId).catch(() => undefined)}
               >
                 Restore Previous ({ps.activeRewindEntry.previousStateLabel})
               </button>
@@ -1083,7 +1062,7 @@ function PerformanceControlPage({
                 </select>
                 <button
                   className="button button-quiet"
-                  onClick={() => void onApplyPowerShift("custom", customSchemeGuid || ps.activeScheme?.guid)}
+                  onClick={() => void onApplyPowerShift("custom", customSchemeGuid || ps.activeScheme?.guid).catch(() => undefined)}
                 >
                   Activate
                 </button>
@@ -1158,7 +1137,7 @@ function PerformanceControlPage({
                         <span>{prof.cleanerOverride.replaceAll("_", " ")}</span>
                         <button
                           className="button button-quiet"
-                          onClick={() => void onActivateGameFocus(prof, null, prof.executable)}
+                          onClick={() => void onActivateGameFocus(prof, null, prof.executable).catch(() => undefined)}
                         >
                           Activate
                         </button>
@@ -1186,7 +1165,7 @@ function PerformanceControlPage({
           <button
             className="button button-quiet"
             disabled={!rewindEntries.some((e) => e.reversible && REWIND_UNRESOLVED.has(e.status))}
-            onClick={() => void onRestoreAllRewind()}
+            onClick={() => void onRestoreAllRewind().catch(() => undefined)}
           >
             Restore All Pending Changes
           </button>
@@ -1232,7 +1211,7 @@ function PerformanceControlPage({
                     </td>
                     <td>
                       {entry.reversible && REWIND_UNRESOLVED.has(entry.status) ? (
-                        <button className="button button-quiet" onClick={() => void onRestoreRewindEntry(entry.actionId)}>
+                        <button className="button button-quiet" onClick={() => void onRestoreRewindEntry(entry.actionId).catch(() => undefined)}>
                           Restore
                         </button>
                       ) : (
@@ -1411,12 +1390,12 @@ function IntelligencePage({
           <button
             className="button button-primary"
             disabled={!manualPid || !Number.isFinite(Number(manualPid))}
-            onClick={() => void onStartFpsCapture(Number(manualPid), manualExe)}
+            onClick={() => void onStartFpsCapture(Number(manualPid), manualExe).catch(() => undefined)}
           >
             Start Capture
           </button>
           {fps?.active && (
-            <button className="button button-quiet" onClick={() => void onStopFpsCapture()}>
+            <button className="button button-quiet" onClick={() => void onStopFpsCapture().catch(() => undefined)}>
               Stop Capture
             </button>
           )}
@@ -1612,7 +1591,7 @@ function Toggle({ checked, onChange, label, description }: { checked: boolean; o
   );
 }
 
-function SettingsPage({
+export function SettingsPage({
   envelope,
   frame,
   saving,
@@ -1625,15 +1604,31 @@ function SettingsPage({
 }) {
   const [draft, setDraft] = useState(envelope.settings);
   const [saved, setSaved] = useState(false);
+  const savedTimer = useRef<number | null>(null);
   useEffect(() => setDraft(envelope.settings), [envelope.settings]);
+  useEffect(() => () => {
+    if (savedTimer.current !== null) window.clearTimeout(savedTimer.current);
+  }, []);
   const update = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => setDraft((current) => ({ ...current, [key]: value }));
   const changed = JSON.stringify(draft) !== JSON.stringify(envelope.settings);
-  const submit = async () => { await onSave(draft); setSaved(true); window.setTimeout(() => setSaved(false), 1800); };
+  const submit = async () => {
+    try {
+      await onSave(draft);
+    } catch {
+      return; // onSave surfaces the failure through the shared error banner
+    }
+    setSaved(true);
+    if (savedTimer.current !== null) window.clearTimeout(savedTimer.current);
+    savedTimer.current = window.setTimeout(() => {
+      savedTimer.current = null;
+      setSaved(false);
+    }, 1800);
+  };
   const adapters = frame?.gpuTelemetry?.availableAdapters ?? [];
 
   return (
-    <div className="page-stack">
-      <PageTitle eyebrow="Settings" title="Quiet by default. Precise by choice." description="Tune monitoring behavior, HUD metrics, GameFocus policies, and automatic standby cleaning. Validated and persisted atomically." side={<button className="button button-primary" disabled={!changed || saving} onClick={() => void submit()}>{saving ? "Saving…" : saved ? "Saved" : "Save changes"}</button>} />
+    <div className="page-stack settings-page">
+      <PageTitle eyebrow="Settings" title="Quiet by default. Precise by choice." description="Tune monitoring behavior, HUD metrics, GameFocus policies, and automatic standby cleaning. Validated and persisted atomically." />
       {envelope.warning && <div className="degraded-banner"><Icon name="info" /><span><strong>Safe defaults active</strong>{envelope.warning}</span></div>}
       <div className="settings-grid">
         <section className="panel settings-section">
@@ -1729,6 +1724,13 @@ function SettingsPage({
         <section className="panel settings-section"><span className="eyebrow">Appearance</span><h2>Interface comfort</h2><Toggle checked={draft.reducedMotion} onChange={(value) => update("reducedMotion", value)} label="Reduced motion" description="Suppress non-essential transitions and ambient movement." /><Toggle checked={draft.compactDensity} onChange={(value) => update("compactDensity", value)} label="Compact density" description="Tighten cards and tables for information-dense windows." /></section>
         <section className="panel settings-section storage-section"><span className="eyebrow">Local-first privacy</span><h2>Settings storage</h2><div className="storage-path"><code>{envelope.path || "Resolving local application data path…"}</code></div><ul className="check-list"><li><span>✓</span> No account required</li><li><span>✓</span> No uploaded analytics</li><li><span>✓</span> Atomic local writes</li></ul></section>
       </div>
+      {(changed || saving || saved) && (
+        <div className="save-floater" role="status" aria-live="polite">
+          <span className="save-floater-label">{saving ? "Saving changes…" : changed ? "Unsaved changes" : "All changes saved"}</span>
+          {changed && <button className="button button-quiet" disabled={saving} onClick={() => setDraft(envelope.settings)}>Discard</button>}
+          <button className="button button-primary" disabled={!changed || saving} onClick={() => void submit()}>{saving ? "Saving…" : changed ? "Save changes" : "Saved"}</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -1736,6 +1738,18 @@ function SettingsPage({
 function UnavailablePanel({ title, detail }: { title: string; detail: string }) {
   return <section className="panel unavailable-panel"><Icon name="info" /><div><h2>{title}</h2><p>{detail}</p></div></section>;
 }
+
+const FALLBACK_CAPABILITY: ActionCapability = {
+  status: "unverified",
+  compatibilityStatus: "unverified",
+  supported: false,
+  requiresElevation: false,
+  privilegeState: "not_evaluated",
+  mechanismAvailable: false,
+  osBuild: null,
+  mechanism: "Unavailable",
+  explanation: "Capability detection has not completed."
+};
 
 export default function App() {
   const [page, setPage] = useState<PageId>("overview");
@@ -1772,27 +1786,15 @@ export default function App() {
     document.documentElement.dataset.density = compactDensity ? "compact" : "comfortable";
   }, [reducedMotion, compactDensity]);
 
-  const capability =
-    runtime?.actionCapability ??
-    ({
-      status: "unverified",
-      compatibilityStatus: "unverified",
-      supported: false,
-      requiresElevation: false,
-      privilegeState: "not_evaluated",
-      mechanismAvailable: false,
-      osBuild: null,
-      mechanism: "Unavailable",
-      explanation: "Capability detection has not completed."
-    } satisfies ActionCapability);
+  const capability = runtime?.actionCapability ?? FALLBACK_CAPABILITY;
 
-  const dismissOnboarding = () => {
+  const dismissOnboarding = useCallback(() => {
     if (!settingsEnvelope) return;
     void saveSettings({
       ...settingsEnvelope.settings,
       onboardingCompleted: true
-    });
-  };
+    }).catch(() => undefined);
+  }, [settingsEnvelope, saveSettings]);
 
   const content = useMemo(() => {
     if (!frame && page !== "settings") return <LoadingView />;
@@ -1840,9 +1842,9 @@ export default function App() {
           actions={actionHistory}
           purging={purging}
           authorizingSession={authorizingSession}
-          onPurge={() => void purgeStandby()}
-          onAuthorizeSession={() => void authorizeCleanerSession()}
-          onRevokeSession={() => void revokeCleanerSession()}
+          onPurge={() => void purgeStandby().catch(() => undefined)}
+          onAuthorizeSession={() => void authorizeCleanerSession().catch(() => undefined)}
+          onRevokeSession={() => void revokeCleanerSession().catch(() => undefined)}
         />
       );
     return (
@@ -1850,15 +1852,8 @@ export default function App() {
         frame={frame}
         history={history}
         capability={capability}
-        runtime={runtime}
-        actions={actionHistory}
-        purging={purging}
-        authorizingSession={authorizingSession}
         showOnboarding={showOnboarding}
         onDismissOnboarding={dismissOnboarding}
-        onPurge={() => void purgeStandby()}
-        onAuthorizeSession={() => void authorizeCleanerSession()}
-        onRevokeSession={() => void revokeCleanerSession()}
         onNavigate={setPage}
       />
     );
@@ -1877,6 +1872,7 @@ export default function App() {
     purging,
     authorizingSession,
     showOnboarding,
+    dismissOnboarding,
     purgeStandby,
     authorizeCleanerSession,
     revokeCleanerSession,

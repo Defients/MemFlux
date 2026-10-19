@@ -29,9 +29,10 @@ npm run tauri build
   - Atomic `RewindJournal` normal restoration, idempotency, compare-before-restore protection when a user externally changes state, and startup crash recovery.
   - Live Windows PowrProf scheme enumeration (`PowerEnumerate`, `PowerReadFriendlyName`), active scheme detection (`PowerGetActiveScheme`), verified scheme switch (`PowerSetActiveScheme`), and automatic Rewind restoration back to the original baseline scheme.
   - GameFocus non-game blocklist (`memflux.exe`, browsers, OBS, Discord, launchers, system processes), streaming workload protection, Alt+Tab focus transition debouncing (`TemporarilyBackgrounded`), and automatic restoration on game process exit.
-- **Frontend (`format.test.ts`, `PerformanceHud.test.tsx`):**
+- **Frontend (`format.test.ts`, `PerformanceHud.test.tsx`, `App.test.tsx`):**
   - Byte/percentage/rate formatting without fabricating unavailable values.
   - Live HUD rendering of CPU, GPU, RAM, absent FPS/frame time (`—`), paused/stale detection, and per-metric HUD customization toggles.
+  - Settings save-floater lifecycle: hidden until a draft diverges, Save/Discard settle it, failed saves never claim success, a new edit replaces the stale Saved label, and the confirmation self-dismisses.
 
 ## Atlas regression and qualification protocol
 
@@ -52,6 +53,6 @@ Atlas replay covers joint sustained pressure, healthy cache/high CPU/GPU without
 
 Synthetic browser layout QA is separate from native WebView2 integration and gameplay. Full Tauri window/DPI/keyboard/tray/Mini HUD interaction, real PresentMon QPC capture, OBS/thermal/storage/VRAM providers and seven-mode profiling remain qualification work.
 
-Current Atlas results: **68 Rust tests passed** (one existing power-mutating test excluded), **11 frontend tests passed**, strict Clippy and format passed, frontend production build passed. Optimized filtered replay passed. Edge layout fixture checked at the default and 900px viewports, simple/advanced disclosure verified; temporary fixture removed. Full Windows native UI integration and provider gameplay timing remain unverified.
+Current Atlas results: **68 Rust tests passed** (one existing power-mutating test excluded), **15 frontend tests passed**, strict Clippy and format passed, frontend production build passed. Optimized filtered replay passed. Edge layout fixture checked at the default and 900px viewports, simple/advanced disclosure verified; temporary fixture removed. Full Windows native UI integration and provider gameplay timing remain unverified.
 
 Final optimized executable build passed after the last source/frontend changes: `src-tauri/target/release/memflux.exe`, 3,860,992 bytes; SHA-256 `4E3A4C5DB55CB71CFFA734A14B3C24767ED828FAD870D3B5E156CB1952AC527E`. Command: `cargo build --manifest-path src-tauri/Cargo.toml --release` (final compilation 1m 56s). The executable was compiled, not launched for a new native purge or power mutation. Installer bundles/signing and remote CI were not rerun.

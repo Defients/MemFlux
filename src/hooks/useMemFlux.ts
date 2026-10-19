@@ -7,14 +7,15 @@ import type {
   PowerShiftMode,
   RuntimeStatus,
   SettingsEnvelope,
-  TelemetryFrame
+  TelemetryFrame,
+  TelemetryHistoryFrame
 } from "../types";
 
 const MAX_HISTORY = 90;
 
 export function useMemFlux() {
   const [frame, setFrame] = useState<TelemetryFrame | null>(null);
-  const [history, setHistory] = useState<Omit<TelemetryFrame, "atlas">[]>([]);
+  const [history, setHistory] = useState<TelemetryHistoryFrame[]>([]);
   const [settingsEnvelope, setSettingsEnvelope] = useState<SettingsEnvelope | null>(null);
   const [runtime, setRuntime] = useState<RuntimeStatus | null>(null);
   const [error, setError] = useState<string | null>(null);

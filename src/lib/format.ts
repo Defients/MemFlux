@@ -35,12 +35,14 @@ export function formatMetric(metric: Metric): string {
   return metric.value?.toLocaleString() ?? UNAVAILABLE;
 }
 
+const TIMESTAMP_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  hour: "numeric",
+  minute: "2-digit",
+  second: "2-digit"
+});
+
 export function formatTimestamp(timestampMs: number): string {
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-    second: "2-digit"
-  }).format(timestampMs);
+  return TIMESTAMP_FORMATTER.format(timestampMs);
 }
 
 export function statusLabel(status: MetricStatus): string {
